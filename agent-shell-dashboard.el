@@ -302,6 +302,17 @@ reading the first JSONL found there."
                         entries)))))))
       entries)))
 
+(defun agent-shell-dashboard-send ()
+  "Send a prompt to the row's session via agent-shell's viewport.
+Switches to the row's buffer (resuming a closed session if needed),
+then pops the viewport compose window via `agent-shell-prompt-compose'.
+Submit with `C-c C-c', cancel with `C-c C-k'."
+  (interactive)
+  (let* ((row (agent-shell-dashboard--row-at-point))
+         (buf (agent-shell-dashboard--ensure-buffer row)))
+    (pop-to-buffer buf)
+    (call-interactively #'agent-shell-prompt-compose)))
+
 (defun agent-shell-dashboard-start-new-session ()
   "Start a new agent-shell session using the first registered config."
   (interactive)
@@ -584,6 +595,7 @@ whose cwd no longer exists."
     (define-key map (kbd "o")   #'agent-shell-dashboard-visit-other-window)
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
     (define-key map (kbd "k")   #'agent-shell-dashboard-kill)
+    (define-key map (kbd "s")   #'agent-shell-dashboard-send)
     (define-key map (kbd "N")   #'agent-shell-dashboard-start-new-session)
     (define-key map (kbd "M")   #'agent-shell-dashboard-start-new-session-pick-repo)
     (define-key map (kbd "j")   #'agent-shell-dashboard-jump)
