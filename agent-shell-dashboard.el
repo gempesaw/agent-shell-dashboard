@@ -75,12 +75,6 @@ recently and are waiting for the user's next prompt.
 Gold-tinted to read as `your turn' on the fairyfloss palette."
   :group 'dg-agent-shell)
 
-(defcustom agent-shell-dashboard-awaiting-minutes 15
-  "Promote a ready session to the `awaiting' status when its last
-prompt was submitted within this many minutes."
-  :type 'number
-  :group 'dg-agent-shell)
-
 (defcustom agent-shell-dashboard-jump-keys
   "asdfjkl;qwertyuiopzxcvbnm"
   "Letters used as single-key shortcuts in `agent-shell-dashboard-jump'."
@@ -148,6 +142,12 @@ Drives the `awaiting' status promotion and the activity column.")
 (defvar-local agent-shell-dashboard--buffer-last-prompt-text nil
   "Text of the most recently submitted user prompt in this buffer.
 Shown as the preview line beneath each row's metadata line.")
+
+(defvar-local agent-shell-dashboard--buffer-marked-read-time nil
+  "Time at which the user acknowledged the session's awaiting state.
+A session in `awaiting' status remains so until either this is set
+to a time newer than `--buffer-last-prompt-time' or a new prompt
+is submitted.  Set via `agent-shell-dashboard-mark-as-read'.")
 
 
 ;;; Inlined helpers (formerly namespaced under the personal config).
@@ -314,10 +314,13 @@ Submit with `C-c C-c', cancel with `C-c C-k'."
     (call-interactively #'agent-shell-prompt-compose)))
 
 (defun agent-shell-dashboard-start-new-session ()
-  "Start a new agent-shell session using the first registered config."
+  "Start a fresh agent-shell session using the first registered config.
+Bypasses the session-resume picker; use `f' on an existing row to
+fork or `r' to reload if you want to attach to prior history."
   (interactive)
   (let* ((entry (car agent-shell-dashboard-identifier-to-config-fn-alist))
-         (config-fn (cdr entry)))
+         (config-fn (cdr entry))
+         (agent-shell-session-strategy 'new))
     (unless config-fn
       (user-error "No agent config registered in %s"
                   'agent-shell-dashboard-identifier-to-config-fn-alist))
@@ -595,11 +598,13 @@ whose cwd no longer exists."
     (define-key map (kbd "o")   #'agent-shell-dashboard-visit-other-window)
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
     (define-key map (kbd "k")   #'agent-shell-dashboard-kill)
+    (define-key map (kbd "m")   #'agent-shell-dashboard-mark-as-read)
     (define-key map (kbd "s")   #'agent-shell-dashboard-send)
     (define-key map (kbd "N")   #'agent-shell-dashboard-start-new-session)
     (define-key map (kbd "M")   #'agent-shell-dashboard-start-new-session-pick-repo)
     (define-key map (kbd "j")   #'agent-shell-dashboard-jump)
     (define-key map (kbd "r")   #'agent-shell-dashboard-reload)
+    (define-key map (kbd "?")   #'agent-shell-dashboard-transient)
     map)
   "Keymap for `agent-shell-dashboard-mode'.")
 
@@ -663,14 +668,11 @@ visible (working / permission / awaiting tints)."
     (when-let ((id (map-nested-elt agent-shell--state '(:session :id))))
       (let* ((raw-status (agent-shell-dashboard--buffer-status buf))
              (last-time agent-shell-dashboard--buffer-last-prompt-time)
-             (mins-since (and last-time
-                              (/ (float-time
-                                  (time-subtract (current-time) last-time))
-                                 60.0)))
-             (status (if (and (eq raw-status 'ready)
-                              mins-since
-                              (< mins-since
-                                 agent-shell-dashboard-awaiting-minutes))
+             (marked-read agent-shell-dashboard--buffer-marked-read-time)
+             (unread (and last-time
+                          (or (not marked-read)
+                              (time-less-p marked-read last-time))))
+             (status (if (and (eq raw-status 'ready) unread)
                          'awaiting
                        raw-status)))
         (list :session-id id
@@ -1139,13 +1141,26 @@ exist than fit horizontally, extra projects wrap to a second band."
   (or (get-text-property (point) 'dg-row)
       (user-error "No dashboard row at point")))
 
+(defun agent-shell-dashboard--find-live-buffer-for-session (session-id)
+  "Return the live agent-shell buffer whose session id is SESSION-ID, or nil."
+  (when session-id
+    (seq-find (lambda (buf)
+                (with-current-buffer buf
+                  (equal session-id
+                         (map-nested-elt agent-shell--state '(:session :id)))))
+              (agent-shell-dashboard--all-buffers))))
+
 (defun agent-shell-dashboard--ensure-buffer (row)
-  "Return a live buffer for ROW, resuming the session if it is closed."
-  (let ((buf (plist-get row :buffer)))
-    (if (and buf (buffer-live-p buf))
-        buf
-      (or (agent-shell-dashboard--resume-session row)
-          (user-error "Could not resume session")))))
+  "Return a live buffer for ROW, resuming the session if needed.
+Always rescans live buffers by session id first, so commands keep
+working when the cached `:buffer' on the row is stale (e.g. the
+session was resumed since the last dashboard refresh)."
+  (let* ((cached (plist-get row :buffer))
+         (sid (plist-get row :session-id)))
+    (or (and (buffer-live-p cached) cached)
+        (agent-shell-dashboard--find-live-buffer-for-session sid)
+        (agent-shell-dashboard--resume-session row)
+        (user-error "Could not resume session"))))
 
 (defun agent-shell-dashboard-visit ()
   "Switch to the row's buffer (resuming first if it is closed)."
@@ -1221,6 +1236,22 @@ agent's on-disk session log."
                       archive)))
       (agent-shell-dashboard--write-summary-archive filtered))))
 
+(defun agent-shell-dashboard-mark-as-read ()
+  "Acknowledge the row's awaiting state, clearing the gold tint.
+Stamps the buffer-local marked-read time to now.  The row will
+re-enter `awaiting' state the next time the agent finishes
+responding to a fresh prompt."
+  (interactive)
+  (let* ((row (agent-shell-dashboard--row-at-point))
+         (sid (plist-get row :session-id))
+         (buf (or (plist-get row :buffer)
+                  (agent-shell-dashboard--find-live-buffer-for-session sid))))
+    (unless (and buf (buffer-live-p buf))
+      (user-error "Row has no live buffer to mark as read"))
+    (with-current-buffer buf
+      (setq agent-shell-dashboard--buffer-marked-read-time (current-time)))
+    (agent-shell-dashboard-refresh)))
+
 (defun agent-shell-dashboard-kill ()
   "Kill or forget the row at point depending on its state.
 On a live row: kill the buffer and any windows displaying it.
@@ -1290,11 +1321,14 @@ showed each project, so the eye lands in the right place."
                                           :height 5.0)))
                      lines)))))
     (erase-buffer)
-    (insert (propertize "Pick a column:\n\n" 'face 'shadow))
+    ;; Take over the dashboard's natural lines 1-2 (its own header +
+    ;; blank) so the project-header line stays at the same buffer line
+    ;; as in normal view — otherwise we'd inject extra blank lines.
+    (insert (propertize "Pick a column:" 'face 'shadow) "\n\n")
     (let* ((line-keys (sort (hash-table-keys lines) #'<))
            (max-line (or (car (last line-keys)) 0)))
-      (dotimes (i max-line)
-        (insert (gethash (1+ i) lines "") "\n")))))
+      (cl-loop for i from 3 to max-line do
+               (insert (gethash i lines "") "\n")))))
 
 (defun agent-shell-dashboard--place-at-col (existing col str)
   "Return EXISTING line with STR placed starting at column COL.
@@ -1345,6 +1379,30 @@ moves point to the chosen column's first row."
                  (tgt (nth chosen-idx new-targets)))
             (when tgt (goto-char (plist-get tgt :first-row-pos)))))
          (t (goto-char (min saved-point (point-max)))))))))
+
+(require 'transient)
+
+(transient-define-prefix agent-shell-dashboard-transient ()
+  "Help / dispatch menu for the agent-shell dashboard."
+  ["Agent Shell Dashboard"
+   ["Navigate"
+    ("n" "next row"      agent-shell-dashboard-next)
+    ("p" "previous row"  agent-shell-dashboard-previous)
+    ("j" "jump column"   agent-shell-dashboard-jump)
+    ("g" "refresh"       agent-shell-dashboard-refresh)]
+   ["Row"
+    ("RET" "visit"               agent-shell-dashboard-visit)
+    ("o"   "open in other window" agent-shell-dashboard-visit-other-window)
+    ("s"   "send (viewport)"     agent-shell-dashboard-send)
+    ("f"   "fork"                agent-shell-dashboard-fork)
+    ("r"   "reload"              agent-shell-dashboard-reload)
+    ("k"   "kill / forget"       agent-shell-dashboard-kill)
+    ("m"   "mark as read"        agent-shell-dashboard-mark-as-read)]
+   ["Sessions"
+    ("N" "new session"               agent-shell-dashboard-start-new-session)
+    ("M" "new session (pick repo)"   agent-shell-dashboard-start-new-session-pick-repo)]
+   ["Dashboard"
+    ("q" "quit and restore layout" agent-shell-dashboard-quit)]])
 
 (defun agent-shell-dashboard-quit ()
   "Bury the dashboard and restore the saved window configuration."
