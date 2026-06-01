@@ -8,6 +8,7 @@
 
 ;;; Code:
 
+(require 'dash)
 (require 'agent-shell-dashboard-data)
 (require 'agent-shell-dashboard-render)
 
@@ -84,11 +85,10 @@ fork or `r' to reload if you want to attach to prior history."
   "Move to the next dashboard row in the same column."
   (interactive)
   (let* ((cur-slot (agent-shell-dashboard--column-slot (point)))
-         (next (seq-find (lambda (pos)
-                           (and (> pos (point))
-                                (= cur-slot
-                                   (agent-shell-dashboard--column-slot pos))))
-                         agent-shell-dashboard--row-positions)))
+         (next (--find (and (> it (point))
+                            (= cur-slot
+                               (agent-shell-dashboard--column-slot it)))
+                       agent-shell-dashboard--row-positions)))
     (when next (goto-char next))))
 
 (defun agent-shell-dashboard-previous ()
