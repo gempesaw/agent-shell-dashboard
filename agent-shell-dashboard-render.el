@@ -10,6 +10,9 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dash)
+(require 'ht)
+(require 's)
 (require 'agent-shell-dashboard-data)
 
 (defvar-local agent-shell-dashboard--row-positions nil
@@ -28,13 +31,13 @@
   '((((background dark))  :background "#1f2d3d")
     (((background light)) :background "#e7eef6"))
   "Persistent row background for sessions currently working."
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defface agent-shell-dashboard-permission-row-face
   '((((background dark))  :background "#3a2a1a")
     (((background light)) :background "#f4ece0"))
   "Persistent row background for sessions awaiting a permission decision."
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defface agent-shell-dashboard-awaiting-row-face
   '((((background dark))  :background "#5e5028")
@@ -42,7 +45,7 @@
   "Persistent row background for sessions whose agent finished
 recently and are waiting for the user's next prompt.
 Gold-tinted to read as `your turn' on the fairyfloss palette."
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defcustom agent-shell-dashboard-jump-keys
   "asdfjkl;qwertyuiopzxcvbnm"
@@ -53,12 +56,12 @@ Gold-tinted to read as `your turn' on the fairyfloss palette."
 (defcustom agent-shell-dashboard-column-width 80
   "Width in characters of each project column in the dashboard."
   :type 'integer
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defcustom agent-shell-dashboard-column-gap 2
   "Number of blank chars between adjacent project columns."
   :type 'integer
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defcustom agent-shell-dashboard-pinned-projects '("infra")
   "Project names rendered as dedicated full-height leftmost columns.
@@ -66,18 +69,18 @@ Pinned columns appear in this list's order, left to right.  All
 remaining projects flow into right-side column bands.  An empty
 list reverts to the uniform banded layout across all projects."
   :type '(repeat string)
-  :group 'dg-agent-shell)
+  :group 'agent-shell-dashboard)
 
 (defun agent-shell-dashboard--clear-highlight ()
   "Remove the row-highlight overlays."
-  (mapc #'delete-overlay agent-shell-dashboard--highlight-overlays)
+  (-each agent-shell-dashboard--highlight-overlays #'delete-overlay)
   (setq agent-shell-dashboard--highlight-overlays nil))
 
 (defun agent-shell-dashboard--apply-row-status-overlays ()
   "Tint working / permission rows with a persistent background.
 Cursor's hl-line overlay has higher priority and so wins on the
 row at point."
-  (mapc #'delete-overlay agent-shell-dashboard--row-status-overlays)
+  (-each agent-shell-dashboard--row-status-overlays #'delete-overlay)
   (setq agent-shell-dashboard--row-status-overlays nil)
   (let ((pos (point-min))
         (max (point-max)))
@@ -102,7 +105,7 @@ row that the cursor is currently on. The other line of the same
 row stays untouched so its persistent status background remains
 visible (working / permission / awaiting tints)."
   (agent-shell-dashboard--clear-highlight)
-  (when-let ((row (get-text-property (point) 'dg-row)))
+  (when-let* ((row (get-text-property (point) 'dg-row)))
     (let* ((end (or (next-single-property-change (point) 'dg-row) (point-max)))
            (start (let ((p (point)))
                     (while (and (> p (point-min))
@@ -140,16 +143,15 @@ Each cell is a plist with :string and :row keys."
                         (agent-shell-dashboard--row-time row))
                        (if (eq status 'closed) "closed" "—")))
          (summary (or (plist-get row :summary) ""))
-         (preview (replace-regexp-in-string
-                   "[ \t\n\r]+" " "
-                   (or (plist-get row :last-prompt-text) "")))
+         (preview (s-replace-regexp "[ \t\n\r]+" " "
+                                    (or (plist-get row :last-prompt-text) "")))
          (line1 (format "  %s  %-7s  %s"
                         glyph
                         (propertize activity 'face 'shadow)
                         summary))
          (line2 (concat "        "
                         (propertize "> " 'face 'shadow)
-                        (propertize (if (string-empty-p preview) "—" preview)
+                        (propertize (if (s-blank? preview) "—" preview)
                                     'face 'shadow))))
     (list (list :string (truncate-string-to-width line1 width nil ?\s)
                 :row row
@@ -162,10 +164,10 @@ Each cell is a plist with :string and :row keys."
 Each cell is a plist with :string and optional :row."
   (let* ((project (car group))
          (rows (cdr group))
-         (n-live (seq-count (lambda (r) (plist-get r :buffer)) rows))
+         (n-live (--count (plist-get it :buffer) rows))
          (n-closed (- (length rows) n-live))
          (header (concat
-                  (propertize (if (string-empty-p project) "(none)" project)
+                  (propertize (if (s-blank? project) "(none)" project)
                               'face (if (zerop n-live)
                                         '(:inherit shadow :height 1.4)
                                       '(:inherit font-lock-function-name-face
@@ -196,9 +198,8 @@ Returns the buffer position where the cell starts."
   "Insert a band of side-by-side GROUPS, each WIDTH chars wide, GAP between.
 Records each column's header-pos and first-row-pos in
 `agent-shell-dashboard--columns'."
-  (let* ((columns (mapcar (lambda (g) (agent-shell-dashboard--group-cells g width))
-                          groups))
-         (height (apply #'max (mapcar #'length columns)))
+  (let* ((columns (--map (agent-shell-dashboard--group-cells it width) groups))
+         (height (apply #'max (-map #'length columns)))
          (blank (list :string (make-string width ?\s)))
          (gap-str (make-string gap ?\s))
          (last-col-idx (1- (length columns)))
@@ -238,40 +239,38 @@ Column metadata is recorded in `agent-shell-dashboard--columns'
 in left-to-right order: pinned first, then right-side band-by-band."
   (let* ((gap-str (make-string gap ?\s))
          (blank-cell (list :string (make-string width ?\s)))
-         (pinned-columns (mapcar (lambda (g) (agent-shell-dashboard--group-cells g width))
-                                 pinned-groups))
+         (pinned-columns (--map (agent-shell-dashboard--group-cells it width)
+                                pinned-groups))
          (n-pinned (length pinned-columns))
          (left-block-width (if (zerop n-pinned)
                                0
                              (+ (* width n-pinned) (* gap n-pinned))))
          (right-area-width (max 80 (- (max 80 (frame-width)) left-block-width)))
          (cols-per-band (max 1 (/ right-area-width (+ width gap))))
-         (right-bands (seq-partition right-groups cols-per-band))
+         (right-bands (-partition-all cols-per-band right-groups))
          (right-lines nil)
          (band-idx 0))
     (dolist (band right-bands)
-      (let* ((cols (mapcar (lambda (g) (agent-shell-dashboard--group-cells g width))
-                           band))
-             (band-h (apply #'max (mapcar #'length cols))))
+      (let* ((cols (--map (agent-shell-dashboard--group-cells it width) band))
+             (band-h (apply #'max (-map #'length cols))))
         (dotimes (line-idx band-h)
           (push (list :type 'data
                       :band-idx band-idx
                       :line-in-band line-idx
-                      :cells (mapcar (lambda (col) (or (nth line-idx col) blank-cell))
-                                     cols))
+                      :cells (--map (or (nth line-idx it) blank-cell) cols))
                 right-lines))
         (push (list :type 'spacer) right-lines))
       (cl-incf band-idx))
     (setq right-lines (nreverse right-lines))
     (let* ((max-pinned-h (if (zerop n-pinned)
                              0
-                           (apply #'max (mapcar #'length pinned-columns))))
+                           (apply #'max (-map #'length pinned-columns))))
            (total (max max-pinned-h (length right-lines)))
            ;; Per-pinned-column tracking: vectors indexed by pinned col idx.
            (pinned-headers (make-vector n-pinned nil))
            (pinned-firsts  (make-vector n-pinned nil))
            ;; Right-side tracking, keyed by (band-idx . col-idx).
-           (right-tracker (make-hash-table :test 'equal)))
+           (right-tracker (ht-create)))
       (dotimes (line-idx total)
         ;; Pinned columns, left to right.
         (let ((p-idx 0))
@@ -296,16 +295,16 @@ in left-to-right order: pinned first, then right-side band-by-band."
               (dolist (cell cells)
                 (let ((right-cell-start (agent-shell-dashboard--insert-cell cell))
                       (key (cons b-idx col-idx)))
-                  (let ((entry (gethash key right-tracker)))
+                  (let ((entry (ht-get right-tracker key)))
                     (when (= line-in-band 0)
-                      (puthash key (cons right-cell-start (cdr entry)) right-tracker))
+                      (ht-set! right-tracker key
+                               (cons right-cell-start (cdr entry))))
                     (when (and (plist-get cell :row-start)
                                (or (not entry) (not (cdr entry))))
-                      (puthash key
-                               (cons (or (car (gethash key right-tracker))
+                      (ht-set! right-tracker key
+                               (cons (or (car (ht-get right-tracker key))
                                          right-cell-start)
-                                     right-cell-start)
-                               right-tracker))))
+                                     right-cell-start)))))
                 (when (< col-idx last-col)
                   (insert gap-str))
                 (cl-incf col-idx)))))
@@ -319,7 +318,7 @@ in left-to-right order: pinned first, then right-side band-by-band."
       ;; Then right-side columns, band-by-band, col-by-col.
       (dotimes (b (length right-bands))
         (dotimes (c (length (nth b right-bands)))
-          (let ((entry (gethash (cons b c) right-tracker)))
+          (let ((entry (ht-get right-tracker (cons b c))))
             (push (list :project (car (nth c (nth b right-bands)))
                         :header-pos (car entry)
                         :first-row-pos (cdr entry))
@@ -335,20 +334,20 @@ exist than fit horizontally, extra projects wrap to a second band."
                         (plist-get (get-text-property (point) 'dg-row)
                                    :session-id)))
          (rows (agent-shell-dashboard--rows))
-         (live (seq-filter (lambda (r) (plist-get r :buffer)) rows))
-         (closed (seq-remove (lambda (r) (plist-get r :buffer)) rows))
+         (live (--filter (plist-get it :buffer) rows))
+         (closed (--remove (plist-get it :buffer) rows))
          (groups (agent-shell-dashboard--group-rows rows))
          (width agent-shell-dashboard-column-width)
          (gap agent-shell-dashboard-column-gap)
          (pinned-names agent-shell-dashboard-pinned-projects)
          ;; Resolve pinned project names to groups, preserving the requested order.
-         (pinned-groups (delq nil (mapcar (lambda (n) (assoc n groups)) pinned-names)))
+         (pinned-groups (--keep (assoc it groups) pinned-names))
          (effective-groups
           (if pinned-groups
-              (seq-remove (lambda (g) (memq g pinned-groups)) groups)
+              (--remove (memq it pinned-groups) groups)
             groups))
          (cols-per-band (max 1 (/ (max 80 (frame-width)) (+ width gap))))
-         (bands (seq-partition effective-groups cols-per-band)))
+         (bands (-partition-all cols-per-band effective-groups)))
     (erase-buffer)
     (setq agent-shell-dashboard--row-positions nil)
     (setq agent-shell-dashboard--columns nil)
@@ -392,8 +391,7 @@ exist than fit horizontally, extra projects wrap to a second band."
 Letters are placed at the same horizontal column as the dashboard
 showed each project, so the eye lands in the right place."
   (let* ((inhibit-read-only t)
-         (descriptors (mapcar #'cdr labeled))
-         (lines (make-hash-table :test 'eql)))
+         (lines (ht-create)))
     ;; Collect (line-num . line-string) per relevant line, before erasing.
     (dolist (pair labeled)
       (let* ((ch (car pair))
@@ -404,36 +402,34 @@ showed each project, so the eye lands in the right place."
         (when h-pos
           (let* ((line (line-number-at-pos h-pos))
                  (col (save-excursion (goto-char h-pos) (current-column)))
-                 (existing (gethash line lines "")))
-            (puthash line
+                 (existing (ht-get lines line "")))
+            (ht-set! lines line
                      (agent-shell-dashboard--place-at-col
                       existing col
                       (propertize (or project "")
                                   'face '(:inherit font-lock-function-name-face
-                                          :height 1.5 :weight bold)))
-                     lines)))
+                                          :height 1.5 :weight bold))))))
         (when fr-pos
           (let* ((line (line-number-at-pos fr-pos))
                  (col (save-excursion (goto-char fr-pos) (current-column)))
-                 (existing (gethash line lines "")))
-            (puthash line
+                 (existing (ht-get lines line "")))
+            (ht-set! lines line
                      (agent-shell-dashboard--place-at-col
                       existing col
                       (propertize (format " %c " ch)
                                   'face '(:foreground "black"
                                           :background "yellow"
                                           :weight bold
-                                          :height 5.0)))
-                     lines)))))
+                                          :height 5.0))))))))
     (erase-buffer)
     ;; Take over the dashboard's natural lines 1-2 (its own header +
     ;; blank) so the project-header line stays at the same buffer line
     ;; as in normal view — otherwise we'd inject extra blank lines.
     (insert (propertize "Pick a column:" 'face 'shadow) "\n\n")
-    (let* ((line-keys (sort (hash-table-keys lines) #'<))
+    (let* ((line-keys (sort (ht-keys lines) #'<))
            (max-line (or (car (last line-keys)) 0)))
       (cl-loop for i from 3 to max-line do
-               (insert (gethash i lines "") "\n")))))
+               (insert (ht-get lines i "") "\n")))))
 
 (defun agent-shell-dashboard--place-at-col (existing col str)
   "Return EXISTING line with STR placed starting at column COL.
@@ -457,8 +453,8 @@ Replaces the dashboard contents with a switch-window-style label
 view while waiting for input, then restores the dashboard and
 moves point to the chosen column's first row."
   (interactive)
-  (let* ((targets (seq-filter (lambda (c) (plist-get c :first-row-pos))
-                              agent-shell-dashboard--columns))
+  (let* ((targets (--filter (plist-get it :first-row-pos)
+                            agent-shell-dashboard--columns))
          (keys (string-to-list agent-shell-dashboard-jump-keys)))
     (when (null targets)
       (user-error "No columns to jump to"))
@@ -479,8 +475,8 @@ moves point to the chosen column's first row."
         (agent-shell-dashboard-refresh)
         (cond
          (chosen-idx
-          (let* ((new-targets (seq-filter (lambda (c) (plist-get c :first-row-pos))
-                                          agent-shell-dashboard--columns))
+          (let* ((new-targets (--filter (plist-get it :first-row-pos)
+                                        agent-shell-dashboard--columns))
                  (tgt (nth chosen-idx new-targets)))
             (when tgt (goto-char (plist-get tgt :first-row-pos)))))
          (t (goto-char (min saved-point (point-max)))))))))

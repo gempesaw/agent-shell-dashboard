@@ -8,6 +8,9 @@
 
 ;;; Code:
 
+(require 'dash)
+(require 'ht)
+(require 's)
 (require 'agent-shell-dashboard-data)
 
 (defvar-local agent-shell-dashboard--prompt-count 0
@@ -37,10 +40,10 @@ captures fire when the prompt count is divisible by this value."
 (defun agent-shell-dashboard--track-prompt-submission (orig-fun &rest args)
   "Advice around `shell-maker-submit' to track prompts and capture last prompt."
   (when (derived-mode-p 'agent-shell-mode)
-    (let ((input (string-trim (buffer-substring-no-properties
-                               (shell-maker--prompt-end-position) (point-max)))))
-      (unless (string-empty-p input)
-        (if (string= input agent-shell-dashboard-summary-prompt)
+    (let ((input (s-trim (buffer-substring-no-properties
+                          (shell-maker--prompt-end-position) (point-max)))))
+      (unless (s-blank? input)
+        (if (s-equals? input agent-shell-dashboard-summary-prompt)
             (setq agent-shell-dashboard--summary-pending t)
           (setq agent-shell-dashboard--buffer-last-prompt-text input)
           (setq agent-shell-dashboard--buffer-last-prompt-time (current-time))
@@ -76,15 +79,15 @@ captures fire when the prompt count is divisible by this value."
 
 (defun agent-shell-dashboard--status-line-p (line)
   "Return non-nil if LINE is an agent-shell status message to skip."
-  (or (string-empty-p line)
-      (string-prefix-p "▶" line)
-      (string-equal line "Done")
-      (string-prefix-p "Requesting " line)
-      (string-prefix-p "Creating " line)
-      (string-prefix-p "Subscribing" line)
-      (string-prefix-p "Initializing" line)
-      (string-equal line "Ready")
-      (string-prefix-p "<shell-maker" line)))
+  (or (s-blank? line)
+      (s-starts-with? "▶" line)
+      (s-equals? line "Done")
+      (s-starts-with? "Requesting " line)
+      (s-starts-with? "Creating " line)
+      (s-starts-with? "Subscribing" line)
+      (s-starts-with? "Initializing" line)
+      (s-equals? line "Ready")
+      (s-starts-with? "<shell-maker" line)))
 
 (defun agent-shell-dashboard--check-for-summary-capture ()
   "Check if we should capture a summary from the buffer."
@@ -105,9 +108,9 @@ captures fire when the prompt count is divisible by this value."
               (goto-char end)
               (forward-line -1)
               (while (and (>= (point) start) (not found-summary))
-                (let ((line (string-trim (buffer-substring-no-properties
-                                          (line-beginning-position)
-                                          (line-end-position)))))
+                (let ((line (s-trim (buffer-substring-no-properties
+                                     (line-beginning-position)
+                                     (line-end-position)))))
                   (unless (agent-shell-dashboard--status-line-p line)
                     (setq found-summary line)))
                 (forward-line -1))
@@ -115,7 +118,7 @@ captures fire when the prompt count is divisible by this value."
                 (setq agent-shell-dashboard--summary-pending nil)
                 (setq agent-shell-dashboard--buffer-summary
                       (truncate-string-to-width found-summary 60 nil nil "..."))
-                (when-let ((sid (map-nested-elt agent-shell--state '(:session :id))))
+                (when-let* ((sid (map-nested-elt agent-shell--state '(:session :id))))
                   (agent-shell-dashboard--archive-summary
                    sid agent-shell-dashboard--buffer-summary default-directory))
                 (message "Summary for %s: %s" (buffer-name) agent-shell-dashboard--buffer-summary)))))))))
@@ -130,10 +133,10 @@ captures fire when the prompt count is divisible by this value."
   "Advice around `agent-shell-queue-request' to record submitted prompts."
   (when (and (derived-mode-p 'agent-shell-mode)
              (stringp request)
-             (let ((trimmed (string-trim request)))
-               (and (not (string-empty-p trimmed))
-                    (not (string= trimmed agent-shell-dashboard-summary-prompt)))))
-    (setq-local agent-shell-dashboard--buffer-last-prompt-text (string-trim request))
+             (let ((trimmed (s-trim request)))
+               (and (not (s-blank? trimmed))
+                    (not (s-equals? trimmed agent-shell-dashboard-summary-prompt)))))
+    (setq-local agent-shell-dashboard--buffer-last-prompt-text (s-trim request))
     (setq-local agent-shell-dashboard--buffer-last-prompt-time (current-time)))
   (apply orig-fun request args))
 
@@ -149,11 +152,9 @@ The upstream clean-up can fail with \"Cannot modify map in-place\" or
 (defun agent-shell-dashboard--collect-active-sessions (&optional exclude-buffer)
   "Collect persistable data for all live agent-shell buffers with session IDs.
 EXCLUDE-BUFFER is omitted from the result if non-nil."
-  (delq nil
-        (mapcar (lambda (buf)
-                  (unless (eq buf exclude-buffer)
-                    (agent-shell-dashboard--buffer-session-data buf)))
-                (agent-shell-dashboard--all-buffers))))
+  (--keep (unless (eq it exclude-buffer)
+            (agent-shell-dashboard--buffer-session-data it))
+          (agent-shell-dashboard--all-buffers)))
 
 (defun agent-shell-dashboard-save-active-sessions (&optional exclude-buffer)
   "Write active agent-shell session metadata to `agent-shell-dashboard-active-sessions-file'.
@@ -164,7 +165,7 @@ EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
       (let ((print-length nil)
             (print-level nil))
         (insert ";; -*- mode: lisp-data; -*-\n")
-        (insert ";; Auto-generated by dg-agent-shell. Do not edit.\n")
+        (insert ";; Auto-generated by agent-shell-dashboard. Do not edit.\n")
         (prin1 sessions (current-buffer))
         (insert "\n")))
     (when (called-interactively-p 'interactive)
@@ -182,11 +183,10 @@ EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
 
 (defun agent-shell-dashboard--archive-summary (session-id summary &optional cwd)
   "Upsert SESSION-ID's SUMMARY in the archive, optionally with CWD context."
-  (when (and session-id summary (not (string-empty-p summary)))
+  (when (and session-id summary (not (s-blank? summary)))
     (let* ((existing (or (agent-shell-dashboard--read-summary-archive) '()))
-           (without (seq-remove (lambda (e)
-                                  (equal (plist-get e :session-id) session-id))
-                                existing))
+           (without (--remove (equal (plist-get it :session-id) session-id)
+                              existing))
            (project (and cwd (file-name-nondirectory
                               (directory-file-name cwd))))
            (entry (list :session-id session-id
@@ -199,22 +199,22 @@ EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
 (defun agent-shell-dashboard--all-known-summaries ()
   "Return a hash table mapping session-id to our session summary.
 Live buffers > active-sessions file > long-term summary archive."
-  (let ((map (make-hash-table :test 'equal)))
+  (let ((map (ht-create)))
     (dolist (entry (or (ignore-errors (agent-shell-dashboard--read-summary-archive))
                        '()))
       (when-let* ((id (plist-get entry :session-id))
                   (s (plist-get entry :summary)))
-        (puthash id s map)))
+        (ht-set! map id s)))
     (dolist (entry (or (ignore-errors (agent-shell-dashboard--read-active-sessions))
                        '()))
       (when-let* ((id (plist-get entry :session-id))
                   (s (plist-get entry :summary)))
-        (puthash id s map)))
+        (ht-set! map id s)))
     (dolist (buf (agent-shell-dashboard--all-buffers))
       (with-current-buffer buf
         (when-let* ((id (map-nested-elt agent-shell--state '(:session :id)))
                     (s agent-shell-dashboard--buffer-summary))
-          (puthash id s map))))
+          (ht-set! map id s))))
     map))
 
 (defun agent-shell-dashboard--session-selection-columns-advice (cols)
@@ -227,7 +227,7 @@ ACP-SESSION is the alist describing the session being labelled."
   (if (eq column 'summary)
       (let* ((id (map-elt acp-session 'sessionId))
              (summaries (agent-shell-dashboard--all-known-summaries))
-             (s (and id (gethash id summaries))))
+             (s (and id (ht-get summaries id))))
         (or s ""))
     (funcall orig-fun column acp-session)))
 
@@ -244,11 +244,9 @@ its conversation history.  Skips sessions already open and ones
 whose cwd no longer exists."
   (interactive)
   (let* ((sessions (agent-shell-dashboard--read-active-sessions))
-         (existing-ids (delq nil
-                             (mapcar (lambda (buf)
-                                       (with-current-buffer buf
-                                         (map-nested-elt agent-shell--state '(:session :id))))
-                                     (agent-shell-dashboard--all-buffers))))
+         (existing-ids (--keep (with-current-buffer it
+                                 (map-nested-elt agent-shell--state '(:session :id)))
+                               (agent-shell-dashboard--all-buffers)))
          (restored 0)
          (skipped 0))
     (dolist (entry sessions)

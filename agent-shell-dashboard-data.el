@@ -11,9 +11,15 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'seq)
+(require 'dash)
+(require 's)
+(require 'ht)
 (require 'subr-x)
 (require 'agent-shell)
+
+(defgroup agent-shell-dashboard nil
+  "Magit-style dashboard for agent-shell sessions."
+  :group 'agent-shell)
 
 (defvar-local agent-shell-dashboard--buffer-summary nil
   "Per-buffer session summary read by the dashboard for display.
@@ -70,10 +76,8 @@ Used when resuming a session into a new buffer."
 
 (defun agent-shell-dashboard--all-buffers ()
   "Return all live agent-shell-mode buffers."
-  (seq-filter (lambda (buf)
-                (with-current-buffer buf
-                  (derived-mode-p 'agent-shell-mode)))
-              (agent-shell-buffers)))
+  (--filter (with-current-buffer it (derived-mode-p 'agent-shell-mode))
+            (agent-shell-buffers)))
 
 (defun agent-shell-dashboard--format-relative-time (time)
   "Format TIME relative to now, e.g. `5m ago', `2h ago'."
@@ -125,8 +129,8 @@ Returns the new buffer, or nil if it could not be located."
       (let* ((default-directory cwd)
              (agent-shell-cwd-function (lambda () cwd)))
         (agent-shell-start :config (funcall config-fn) :session-id session-id))
-      (let ((new-buffer (car (seq-difference (agent-shell-dashboard--all-buffers)
-                                             before))))
+      (let ((new-buffer (car (-difference (agent-shell-dashboard--all-buffers)
+                                          before))))
         (when (and new-buffer summary)
           (with-current-buffer new-buffer
             (setq-local agent-shell-dashboard--buffer-summary summary)))
@@ -221,7 +225,7 @@ reading the first JSONL found there."
 (defun agent-shell-dashboard--row-from-buffer (buf)
   "Build a dashboard row plist from live agent-shell BUF, or nil."
   (with-current-buffer buf
-    (when-let ((id (map-nested-elt agent-shell--state '(:session :id))))
+    (when-let* ((id (map-nested-elt agent-shell--state '(:session :id))))
       (let* ((raw-status (agent-shell-dashboard--buffer-status buf))
              (last-time agent-shell-dashboard--buffer-last-prompt-time)
              (marked-read agent-shell-dashboard--buffer-marked-read-time)
@@ -248,16 +252,16 @@ Sources, in priority order:
   2. `agent-shell-dashboard-active-sessions-file' (if set)
   3. `agent-shell-dashboard-summary-archive-file' (if set)
   4. JSONL logs under `agent-shell-dashboard-claude-projects-dir'."
-  (let ((seen (make-hash-table :test 'equal))
+  (let ((seen (ht-create))
         (rows nil))
     (dolist (buf (agent-shell-dashboard--all-buffers))
-      (when-let ((row (agent-shell-dashboard--row-from-buffer buf)))
-        (puthash (plist-get row :session-id) t seen)
+      (when-let* ((row (agent-shell-dashboard--row-from-buffer buf)))
+        (ht-set! seen (plist-get row :session-id) t)
         (push row rows)))
     (dolist (entry (or (ignore-errors (agent-shell-dashboard--read-active-sessions)) '()))
-      (when-let ((id (plist-get entry :session-id))
-                 ((not (gethash id seen))))
-        (puthash id t seen)
+      (when-let* ((id (plist-get entry :session-id))
+                  ((not (ht-contains? seen id))))
+        (ht-set! seen id t)
         (push (list :session-id id
                     :buffer nil
                     :cwd (plist-get entry :cwd)
@@ -270,9 +274,9 @@ Sources, in priority order:
               rows)))
     (let ((archive (or (ignore-errors (agent-shell-dashboard--read-summary-archive)) '())))
       (dolist (entry archive)
-        (when-let ((id (plist-get entry :session-id))
-                   ((not (gethash id seen))))
-          (puthash id t seen)
+        (when-let* ((id (plist-get entry :session-id))
+                    ((not (ht-contains? seen id))))
+          (ht-set! seen id t)
           (push (list :session-id id
                       :buffer nil
                       :cwd (plist-get entry :cwd)
@@ -285,9 +289,9 @@ Sources, in priority order:
                       :last-prompt-text nil)
                 rows)))
       (dolist (entry (agent-shell-dashboard--enumerate-jsonls))
-        (when-let ((id (plist-get entry :session-id))
-                   ((not (gethash id seen))))
-          (puthash id t seen)
+        (when-let* ((id (plist-get entry :session-id))
+                    ((not (ht-contains? seen id))))
+          (ht-set! seen id t)
           (push (list :session-id id
                       :buffer nil
                       :cwd (plist-get entry :cwd)
@@ -301,19 +305,17 @@ Sources, in priority order:
       ;; Backfill missing summaries on rows from earlier sources.
       (dolist (row rows)
         (unless (plist-get row :summary)
-          (when-let ((entry (seq-find
-                             (lambda (e)
-                               (equal (plist-get e :session-id)
-                                      (plist-get row :session-id)))
-                             archive)))
+          (when-let* ((entry (--find (equal (plist-get it :session-id)
+                                            (plist-get row :session-id))
+                                     archive)))
             (plist-put row :summary (plist-get entry :summary))))))
     (sort rows #'agent-shell-dashboard--row-less-p)))
 
 (defun agent-shell-dashboard--row-time (row)
   "Return the most relevant timestamp for ROW, or nil."
   (or (plist-get row :last-prompt-time)
-      (and (plist-get row :updated-at)
-           (ignore-errors (date-to-time (plist-get row :updated-at))))))
+      (when-let* ((updated (plist-get row :updated-at)))
+        (ignore-errors (date-to-time updated)))))
 
 (defun agent-shell-dashboard--row-less-p (a b)
   "Return non-nil if dashboard row A should sort before B.
@@ -333,9 +335,9 @@ Live ahead of closed; within each group, newest activity first."
 
 (defun agent-shell-dashboard--row-is-today (row)
   "Return non-nil if ROW's most-recent activity is on today's calendar date."
-  (when-let ((time (agent-shell-dashboard--row-time row)))
-    (string= (format-time-string "%Y-%m-%d" time)
-             (format-time-string "%Y-%m-%d" (current-time)))))
+  (when-let* ((time (agent-shell-dashboard--row-time row)))
+    (s-equals? (format-time-string "%Y-%m-%d" time)
+               (format-time-string "%Y-%m-%d" (current-time)))))
 
 (defun agent-shell-dashboard--row-project (row)
   "Return the project basename for ROW's cwd, or empty string."
@@ -360,15 +362,15 @@ Sections are sorted live-first, then by most recent activity."
 
 (defun agent-shell-dashboard--group-newest-time (rows)
   "Return the most recent activity time across ROWS, or nil."
-  (car (sort (delq nil (mapcar #'agent-shell-dashboard--row-time rows))
+  (car (sort (--keep (agent-shell-dashboard--row-time it) rows)
              (lambda (x y) (time-less-p y x)))))
 
 (defun agent-shell-dashboard--group-less-p (a b)
   "Sort group A before B by liveness, then most-recent activity, then name."
   (let* ((rows-a (cdr a))
          (rows-b (cdr b))
-         (live-a (seq-some (lambda (r) (plist-get r :buffer)) rows-a))
-         (live-b (seq-some (lambda (r) (plist-get r :buffer)) rows-b))
+         (live-a (--some (plist-get it :buffer) rows-a))
+         (live-b (--some (plist-get it :buffer) rows-b))
          (ta (agent-shell-dashboard--group-newest-time rows-a))
          (tb (agent-shell-dashboard--group-newest-time rows-b)))
     (cond
@@ -382,11 +384,10 @@ Sections are sorted live-first, then by most recent activity."
 (defun agent-shell-dashboard--find-live-buffer-for-session (session-id)
   "Return the live agent-shell buffer whose session id is SESSION-ID, or nil."
   (when session-id
-    (seq-find (lambda (buf)
-                (with-current-buffer buf
-                  (equal session-id
-                         (map-nested-elt agent-shell--state '(:session :id)))))
-              (agent-shell-dashboard--all-buffers))))
+    (--find (with-current-buffer it
+              (equal session-id
+                     (map-nested-elt agent-shell--state '(:session :id))))
+            (agent-shell-dashboard--all-buffers))))
 
 (defun agent-shell-dashboard--forget-session (session-id)
   "Remove SESSION-ID from the active-sessions file and summary archive,
@@ -396,17 +397,15 @@ agent's on-disk session log."
     (let* ((active (or (ignore-errors
                         (agent-shell-dashboard--read-active-sessions))
                        '()))
-           (filtered (seq-remove
-                      (lambda (e) (equal (plist-get e :session-id) session-id))
-                      active)))
+           (filtered (--remove (equal (plist-get it :session-id) session-id)
+                               active)))
       (agent-shell-dashboard--write-active-sessions filtered)))
   (when agent-shell-dashboard-summary-archive-file
     (let* ((archive (or (ignore-errors
                          (agent-shell-dashboard--read-summary-archive))
                         '()))
-           (filtered (seq-remove
-                      (lambda (e) (equal (plist-get e :session-id) session-id))
-                      archive)))
+           (filtered (--remove (equal (plist-get it :session-id) session-id)
+                               archive)))
       (agent-shell-dashboard--write-summary-archive filtered))))
 
 (provide 'agent-shell-dashboard-data)
