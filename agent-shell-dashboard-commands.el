@@ -34,6 +34,7 @@
     (define-key map (kbd "M")   #'agent-shell-dashboard-start-new-session-pick-repo)
     (define-key map (kbd "j")   #'agent-shell-dashboard-jump)
     (define-key map (kbd "r")   #'agent-shell-dashboard-reload)
+    (define-key map (kbd "/")   #'agent-shell-dashboard-search)
     map)
   "Keymap for `agent-shell-dashboard-mode'.")
 
@@ -101,6 +102,34 @@ fork or `r' to reload if you want to attach to prior history."
                                      (agent-shell-dashboard--column-slot pos)))
                         return pos)))
     (when prev (goto-char prev))))
+
+(defun agent-shell-dashboard-search ()
+  "Jump to a row by searching project / summary / preview text.
+Searches the full row data, not just what fits in the displayed
+column.  Tags captured by `agent-shell-dashboard-setup' show up
+here even when truncated off-screen."
+  (interactive)
+  (unless (eq major-mode 'agent-shell-dashboard-mode)
+    (user-error "Not in agent-shell-dashboard-mode"))
+  (unless agent-shell-dashboard--row-positions
+    (user-error "No rows to search"))
+  (let* ((candidates
+          (--map
+           (let* ((row (get-text-property it 'dg-row))
+                  (cwd (plist-get row :cwd))
+                  (project (or (and cwd (file-name-nondirectory
+                                         (directory-file-name cwd)))
+                               ""))
+                  (summary (or (plist-get row :summary) ""))
+                  (preview (or (plist-get row :last-prompt-text) ""))
+                  (label (s-trim (format "%s | %s | %s"
+                                         project summary preview))))
+             (cons label it))
+           agent-shell-dashboard--row-positions))
+         (choice (completing-read "Jump to row: "
+                                  (-map #'car candidates) nil t))
+         (pos (cdr (assoc choice candidates))))
+    (when pos (goto-char pos))))
 
 (defun agent-shell-dashboard--row-at-point ()
   "Return the row plist at point, or signal a `user-error'."

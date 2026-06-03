@@ -288,5 +288,37 @@
       (delete-file archive-tmp)
       (delete-directory jsonl-root t))))
 
+;;;; --- Search ----------------------------------------------------
+
+(ert-deftest asd-test-search-jumps-to-match ()
+  "Search labels rows by project | summary | preview and jumps on RET."
+  (let ((agent-shell-dashboard-active-sessions-file nil)
+        (agent-shell-dashboard-summary-archive-file nil)
+        (agent-shell-dashboard-claude-projects-dir nil)
+        (agent-shell-dashboard-pinned-projects nil)
+        (buf (generate-new-buffer "*asd-search-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (agent-shell-dashboard-mode)
+          ;; Hand-render two rows so we don't need real agent-shell state.
+          (let ((inhibit-read-only t))
+            (insert (propertize "alpha | tag-one | hello\n"
+                                'dg-row '(:session-id "s1" :cwd "/x/alpha"
+                                          :summary "tag-one" :status closed
+                                          :last-prompt-text "hello")))
+            (insert (propertize "beta  | tag-two | world\n"
+                                'dg-row '(:session-id "s2" :cwd "/x/beta"
+                                          :summary "tag-two" :status closed
+                                          :last-prompt-text "world"))))
+          (setq agent-shell-dashboard--row-positions '(1 25))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt collection &rest _)
+                       ;; pick the candidate containing "tag-two"
+                       (--find (s-contains? "tag-two" it) collection))))
+            (goto-char (point-min))
+            (agent-shell-dashboard-search)
+            (should (= (point) 25))))
+      (kill-buffer buf))))
+
 (provide 'agent-shell-dashboard-test)
 ;;; agent-shell-dashboard-test.el ends here

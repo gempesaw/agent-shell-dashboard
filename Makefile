@@ -1,8 +1,10 @@
 EMACS ?= emacs
 ELPA   = $(HOME)/.emacs.d/elpa
 
-# Latest installed copy of each dep, by mtime.
-AGENT_SHELL = $(shell ls -td $(ELPA)/agent-shell-* | head -1)
+# Latest installed copy of each dep, by mtime.  The agent-shell glob
+# excludes our own elpa install (agent-shell-dashboard) which would
+# otherwise shadow it.
+AGENT_SHELL = $(shell ls -td $(ELPA)/agent-shell-2* | head -1)
 SHELL_MAKER = $(shell ls -td $(ELPA)/shell-maker-* | head -1)
 ACP         = $(shell ls -td $(ELPA)/acp-*         | head -1)
 DASH        = $(shell ls -td $(ELPA)/dash-*        | head -1)
