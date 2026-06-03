@@ -17,6 +17,7 @@
     ("n" "next row"      agent-shell-dashboard-next)
     ("p" "previous row"  agent-shell-dashboard-previous)
     ("j" "jump column"   agent-shell-dashboard-jump)
+    ("/" "search"        agent-shell-dashboard-search)
     ("g" "refresh"       agent-shell-dashboard-refresh)]
    ["Row"
     ("RET" "visit"               agent-shell-dashboard-visit)
