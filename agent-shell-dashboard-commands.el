@@ -217,11 +217,33 @@ responding to a fresh prompt."
       (setq agent-shell-dashboard--buffer-marked-read-time (current-time)))
     (agent-shell-dashboard-refresh)))
 
+(defun agent-shell-dashboard--neighbor-row-id (excluded-id)
+  "Return the session id of a row near point that isn't EXCLUDED-ID.
+Prefers the next row in the same column, falls back to the
+previous one.  Used to keep the cursor near where it was after a
+row is removed and the dashboard re-renders."
+  (cl-flet ((id-at-point ()
+              (let ((id (plist-get (get-text-property (point) 'dg-row)
+                                   :session-id)))
+                (unless (equal id excluded-id) id))))
+    (or (save-excursion (agent-shell-dashboard-next) (id-at-point))
+        (save-excursion (agent-shell-dashboard-previous) (id-at-point)))))
+
+(defun agent-shell-dashboard--goto-row-by-id (session-id)
+  "Move point to the row whose `:session-id' is SESSION-ID, if present."
+  (when session-id
+    (cl-loop for pos in agent-shell-dashboard--row-positions
+             for r = (get-text-property pos 'dg-row)
+             when (equal session-id (plist-get r :session-id))
+             return (progn (goto-char pos) t))))
+
 (defun agent-shell-dashboard-kill ()
   "Kill or forget the row at point depending on its state.
 On a live row: kill the buffer and any windows displaying it.
-On a closed row: permanently forget the session, removing it
-from the active-sessions file and summary archive."
+On a closed row: permanently forget the session (active-sessions,
+summary archive, tombstone file).  Either way, leaves the cursor
+on a row adjacent to the one removed so successive `k' presses
+keep peeling off rows from the same spot."
   (interactive)
   (let* ((row (agent-shell-dashboard--row-at-point))
          (buf (plist-get row :buffer))
@@ -229,7 +251,8 @@ from the active-sessions file and summary archive."
          (label (or (plist-get row :summary)
                     (and session-id
                          (substring session-id 0 (min 8 (length session-id))))
-                    "this row")))
+                    "this row"))
+         (neighbor-id (agent-shell-dashboard--neighbor-row-id session-id)))
     (cond
      ((and buf (buffer-live-p buf))
       (when (yes-or-no-p (format "Kill %s? " (buffer-name buf)))
@@ -238,14 +261,16 @@ from the active-sessions file and summary archive."
           (dolist (w windows)
             (when (window-live-p w)
               (ignore-errors (delete-window w)))))
-        (agent-shell-dashboard-refresh)))
+        (agent-shell-dashboard-refresh)
+        (agent-shell-dashboard--goto-row-by-id neighbor-id)))
      ((null session-id)
       (user-error "Row has no session id"))
      (t
       (when (yes-or-no-p
              (format "Forget closed session \"%s\" permanently? " label))
         (agent-shell-dashboard--forget-session session-id)
-        (agent-shell-dashboard-refresh))))))
+        (agent-shell-dashboard-refresh)
+        (agent-shell-dashboard--goto-row-by-id neighbor-id))))))
 
 (defun agent-shell-dashboard-quit ()
   "Bury the dashboard and restore the saved window configuration."
