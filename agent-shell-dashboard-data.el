@@ -67,6 +67,16 @@ when the summary capture succeeds."
   :type 'file
   :group 'agent-shell-dashboard)
 
+(defcustom agent-shell-dashboard-forgotten-ids-file
+  (expand-file-name "agent-shell-dashboard-forgotten.el" user-emacs-directory)
+  "Tombstone file: a list of session ids the user has explicitly forgotten.
+Killing a closed row appends to this file.  Rows enumerated from
+the JSONL scan are filtered against the set so forgotten sessions
+stay forgotten across restarts.  Resuming a row (RET, fork) removes
+its id from the set."
+  :type 'file
+  :group 'agent-shell-dashboard)
+
 (defcustom agent-shell-dashboard-identifier-to-config-fn-alist
   '((claude-code . agent-shell-anthropic-make-claude-code-config))
   "Map an agent's `:identifier' symbol to its config-builder function.
@@ -140,6 +150,8 @@ Returns the new buffer, or nil if it could not be located."
         (when (and new-buffer summary)
           (with-current-buffer new-buffer
             (setq-local agent-shell-dashboard--buffer-summary summary)))
+        ;; Resuming a tombstoned session is an un-forget signal.
+        (agent-shell-dashboard--untombstone-session session-id)
         new-buffer))))
 
 (defun agent-shell-dashboard--read-active-sessions ()
@@ -180,6 +192,42 @@ Returns the new buffer, or nil if it could not be located."
         (insert ";; Append-only archive of agent-shell session summaries.\n")
         (prin1 entries (current-buffer))
         (insert "\n")))))
+
+(defun agent-shell-dashboard--read-forgotten-ids ()
+  "Read `agent-shell-dashboard-forgotten-ids-file' or return nil."
+  (when (and agent-shell-dashboard-forgotten-ids-file
+             (file-exists-p agent-shell-dashboard-forgotten-ids-file))
+    (with-temp-buffer
+      (insert-file-contents agent-shell-dashboard-forgotten-ids-file)
+      (goto-char (point-min))
+      (condition-case nil (read (current-buffer)) (error nil)))))
+
+(defun agent-shell-dashboard--write-forgotten-ids (ids)
+  "Overwrite `agent-shell-dashboard-forgotten-ids-file' with IDS."
+  (when agent-shell-dashboard-forgotten-ids-file
+    (with-temp-file agent-shell-dashboard-forgotten-ids-file
+      (let ((print-length nil)
+            (print-level nil))
+        (insert ";; -*- mode: lisp-data; -*-\n")
+        (insert ";; Session ids forgotten via the dashboard's kill command.\n")
+        (prin1 ids (current-buffer))
+        (insert "\n")))))
+
+(defun agent-shell-dashboard--tombstone-session (session-id)
+  "Add SESSION-ID to the forgotten-ids file, idempotent."
+  (when session-id
+    (let ((ids (or (agent-shell-dashboard--read-forgotten-ids) '())))
+      (unless (member session-id ids)
+        (agent-shell-dashboard--write-forgotten-ids
+         (cons session-id ids))))))
+
+(defun agent-shell-dashboard--untombstone-session (session-id)
+  "Remove SESSION-ID from the forgotten-ids file if present."
+  (when session-id
+    (let ((ids (agent-shell-dashboard--read-forgotten-ids)))
+      (when (member session-id ids)
+        (agent-shell-dashboard--write-forgotten-ids
+         (remove session-id ids))))))
 
 (defun agent-shell-dashboard--sniff-jsonl-cwd (path)
   "Extract the cwd recorded in JSONL file PATH, if any.
@@ -268,7 +316,13 @@ snapshot, else the archive's last-summary-capture time."
          (jsonls (agent-shell-dashboard--enumerate-jsonls))
          ;; session-id -> :updated-at; JSONL mtime is the canonical
          ;; "last activity" for closed rows.
-         (jsonl-mtime (ht-create)))
+         (jsonl-mtime (ht-create))
+         ;; Tombstoned ids stay out of the JSONL-only source so killed
+         ;; rows don't re-surface as empty stubs.
+         (forgotten (ht-create)))
+    (dolist (id (or (ignore-errors (agent-shell-dashboard--read-forgotten-ids))
+                    '()))
+      (ht-set! forgotten id t))
     (dolist (entry jsonls)
       (ht-set! jsonl-mtime (plist-get entry :session-id)
                (plist-get entry :updated-at)))
@@ -310,7 +364,8 @@ snapshot, else the archive's last-summary-capture time."
                 rows)))
       (dolist (entry jsonls)
         (when-let* ((id (plist-get entry :session-id))
-                    ((not (ht-contains? seen id))))
+                    ((not (ht-contains? seen id)))
+                    ((not (ht-contains? forgotten id))))
           (ht-set! seen id t)
           (push (list :session-id id
                       :buffer nil
@@ -426,7 +481,8 @@ agent's on-disk session log."
                         '()))
            (filtered (--remove (equal (plist-get it :session-id) session-id)
                                archive)))
-      (agent-shell-dashboard--write-summary-archive filtered))))
+      (agent-shell-dashboard--write-summary-archive filtered)))
+  (agent-shell-dashboard--tombstone-session session-id))
 
 (provide 'agent-shell-dashboard-data)
 ;;; agent-shell-dashboard-data.el ends here

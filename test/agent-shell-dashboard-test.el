@@ -288,6 +288,59 @@
       (delete-file archive-tmp)
       (delete-directory jsonl-root t))))
 
+;;;; --- Tombstones -----------------------------------------------
+
+(ert-deftest asd-test-tombstone-roundtrip ()
+  "Tombstoning then untombstoning is symmetric."
+  (let ((tmp (make-temp-file "asd-forgotten-" nil ".el")))
+    (unwind-protect
+        (let ((agent-shell-dashboard-forgotten-ids-file tmp))
+          (agent-shell-dashboard--tombstone-session "abc")
+          (agent-shell-dashboard--tombstone-session "def")
+          (agent-shell-dashboard--tombstone-session "abc")  ;; idempotent
+          (should (equal '("def" "abc")
+                         (agent-shell-dashboard--read-forgotten-ids)))
+          (agent-shell-dashboard--untombstone-session "abc")
+          (should (equal '("def")
+                         (agent-shell-dashboard--read-forgotten-ids))))
+      (delete-file tmp))))
+
+(ert-deftest asd-test-rows-filters-tombstoned-jsonls ()
+  "A tombstoned session id is hidden from the JSONL source."
+  (let ((forgotten-tmp (make-temp-file "asd-forgotten-" nil ".el"))
+        (jsonl-root    (make-temp-file "asd-jsonl-"     t)))
+    (unwind-protect
+        (let ((agent-shell-dashboard-active-sessions-file nil)
+              (agent-shell-dashboard-summary-archive-file nil)
+              (agent-shell-dashboard-claude-projects-dir jsonl-root)
+              (agent-shell-dashboard-forgotten-ids-file forgotten-tmp))
+          (asd-test--make-jsonl-fixture jsonl-root "a" "keep-me")
+          (asd-test--make-jsonl-fixture jsonl-root "b" "forget-me")
+          (agent-shell-dashboard--tombstone-session "forget-me")
+          (let* ((rows (agent-shell-dashboard--rows))
+                 (ids  (--map (plist-get it :session-id) rows)))
+            (should (member "keep-me" ids))
+            (should-not (member "forget-me" ids))))
+      (delete-file forgotten-tmp)
+      (delete-directory jsonl-root t))))
+
+(ert-deftest asd-test-forget-tombstones-the-session ()
+  "Calling `--forget-session' writes to the tombstone file."
+  (let ((active-tmp    (make-temp-file "asd-active-"    nil ".el"))
+        (archive-tmp   (make-temp-file "asd-summary-"   nil ".el"))
+        (forgotten-tmp (make-temp-file "asd-forgotten-" nil ".el")))
+    (unwind-protect
+        (let ((agent-shell-dashboard-active-sessions-file  active-tmp)
+              (agent-shell-dashboard-summary-archive-file  archive-tmp)
+              (agent-shell-dashboard-forgotten-ids-file    forgotten-tmp))
+          (agent-shell-dashboard--forget-session "doomed")
+          (should (member "doomed"
+                          (agent-shell-dashboard--read-forgotten-ids))))
+      (delete-file active-tmp)
+      (delete-file archive-tmp)
+      (delete-file forgotten-tmp))))
+
+
 ;;;; --- Search ----------------------------------------------------
 
 (ert-deftest asd-test-search-jumps-to-match ()
