@@ -99,7 +99,9 @@ this if your environment can detect a pending permission request."
    (t 'ready)))
 
 (defun agent-shell-dashboard--buffer-session-data (buf)
-  "Return persistable data for BUF, or nil if it has no session ID."
+  "Return persistable data for BUF, or nil if it has no session ID.
+Records the most recent activity time so that the active-sessions
+file remains a useful sort key even without JSONL fallback."
   (with-current-buffer buf
     (when-let* ((session-id (map-nested-elt agent-shell--state '(:session :id)))
                 (config (map-elt agent-shell--state :agent-config))
@@ -108,7 +110,11 @@ this if your environment can detect a pending permission request."
             :session-id session-id
             :cwd default-directory
             :identifier identifier
-            :summary agent-shell-dashboard--buffer-summary))))
+            :summary agent-shell-dashboard--buffer-summary
+            :updated-at (format-time-string
+                         "%FT%T%z"
+                         (or agent-shell-dashboard--buffer-last-prompt-time
+                             (current-time)))))))
 
 (defun agent-shell-dashboard--resume-session (entry)
   "Open a new agent-shell buffer resuming the session described by ENTRY.
@@ -251,9 +257,21 @@ Sources, in priority order:
   1. live agent-shell buffers
   2. `agent-shell-dashboard-active-sessions-file' (if set)
   3. `agent-shell-dashboard-summary-archive-file' (if set)
-  4. JSONL logs under `agent-shell-dashboard-claude-projects-dir'."
-  (let ((seen (ht-create))
-        (rows nil))
+  4. JSONL logs under `agent-shell-dashboard-claude-projects-dir'.
+
+The :updated-at on closed rows always reflects the most recent
+activity time: JSONL mtime if available (file is written on every
+agent message), else the time recorded in the active-sessions
+snapshot, else the archive's last-summary-capture time."
+  (let* ((seen (ht-create))
+         (rows nil)
+         (jsonls (agent-shell-dashboard--enumerate-jsonls))
+         ;; session-id -> :updated-at; JSONL mtime is the canonical
+         ;; "last activity" for closed rows.
+         (jsonl-mtime (ht-create)))
+    (dolist (entry jsonls)
+      (ht-set! jsonl-mtime (plist-get entry :session-id)
+               (plist-get entry :updated-at)))
     (dolist (buf (agent-shell-dashboard--all-buffers))
       (when-let* ((row (agent-shell-dashboard--row-from-buffer buf)))
         (ht-set! seen (plist-get row :session-id) t)
@@ -268,7 +286,8 @@ Sources, in priority order:
                     :identifier (plist-get entry :identifier)
                     :summary (plist-get entry :summary)
                     :status 'closed
-                    :updated-at nil
+                    :updated-at (or (ht-get jsonl-mtime id)
+                                    (plist-get entry :updated-at))
                     :last-prompt-time nil
                     :last-prompt-text nil)
               rows)))
@@ -284,11 +303,12 @@ Sources, in priority order:
                       :identifier 'claude-code
                       :summary (plist-get entry :summary)
                       :status 'closed
-                      :updated-at (plist-get entry :updated-at)
+                      :updated-at (or (ht-get jsonl-mtime id)
+                                      (plist-get entry :updated-at))
                       :last-prompt-time nil
                       :last-prompt-text nil)
                 rows)))
-      (dolist (entry (agent-shell-dashboard--enumerate-jsonls))
+      (dolist (entry jsonls)
         (when-let* ((id (plist-get entry :session-id))
                     ((not (ht-contains? seen id))))
           (ht-set! seen id t)
