@@ -27,7 +27,8 @@
     (define-key map (kbd "RET") #'agent-shell-dashboard-visit)
     (define-key map (kbd "o")   #'agent-shell-dashboard-visit-other-window)
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
-    (define-key map (kbd "k")   #'agent-shell-dashboard-kill)
+    (define-key map (kbd "k")   #'agent-shell-dashboard-stop)
+    (define-key map (kbd "K")   #'agent-shell-dashboard-forget)
     (define-key map (kbd "m")   #'agent-shell-dashboard-mark-as-read)
     (define-key map (kbd "s")   #'agent-shell-dashboard-send)
     (define-key map (kbd "N")   #'agent-shell-dashboard-start-new-session)
@@ -237,13 +238,30 @@ row is removed and the dashboard re-renders."
              when (equal session-id (plist-get r :session-id))
              return (progn (goto-char pos) t))))
 
-(defun agent-shell-dashboard-kill ()
-  "Kill or forget the row at point depending on its state.
-On a live row: kill the buffer and any windows displaying it.
-On a closed row: permanently forget the session (active-sessions,
-summary archive, tombstone file).  Either way, leaves the cursor
-on a row adjacent to the one removed so successive `k' presses
-keep peeling off rows from the same spot."
+(defun agent-shell-dashboard-stop ()
+  "Stop the row's live session (kill its buffer + windows).
+No-op on a closed row — use `K' to forget those permanently."
+  (interactive)
+  (let* ((row (agent-shell-dashboard--row-at-point))
+         (buf (plist-get row :buffer))
+         (session-id (plist-get row :session-id))
+         (neighbor-id (agent-shell-dashboard--neighbor-row-id session-id)))
+    (unless (and buf (buffer-live-p buf))
+      (user-error "Row is not live; use K to forget closed sessions"))
+    (when (yes-or-no-p (format "Stop %s? " (buffer-name buf)))
+      (let ((windows (get-buffer-window-list buf nil nil)))
+        (kill-buffer buf)
+        (dolist (w windows)
+          (when (window-live-p w)
+            (ignore-errors (delete-window w)))))
+      (agent-shell-dashboard-refresh)
+      (agent-shell-dashboard--goto-row-by-id neighbor-id))))
+
+(defun agent-shell-dashboard-forget ()
+  "Forget the row's session permanently.
+Kills the live buffer first when present, then strips the session
+id from the active-sessions file and summary archive, and adds it
+to the tombstone so JSONL enumeration won't resurface the row."
   (interactive)
   (let* ((row (agent-shell-dashboard--row-at-point))
          (buf (plist-get row :buffer))
@@ -253,24 +271,22 @@ keep peeling off rows from the same spot."
                          (substring session-id 0 (min 8 (length session-id))))
                     "this row"))
          (neighbor-id (agent-shell-dashboard--neighbor-row-id session-id)))
-    (cond
-     ((and buf (buffer-live-p buf))
-      (when (yes-or-no-p (format "Kill %s? " (buffer-name buf)))
+    (unless session-id
+      (user-error "Row has no session id"))
+    (when (yes-or-no-p
+           (format (if (and buf (buffer-live-p buf))
+                       "Forget \"%s\" permanently (also kills its live buffer)? "
+                     "Forget \"%s\" permanently? ")
+                   label))
+      (when (and buf (buffer-live-p buf))
         (let ((windows (get-buffer-window-list buf nil nil)))
           (kill-buffer buf)
           (dolist (w windows)
             (when (window-live-p w)
-              (ignore-errors (delete-window w)))))
-        (agent-shell-dashboard-refresh)
-        (agent-shell-dashboard--goto-row-by-id neighbor-id)))
-     ((null session-id)
-      (user-error "Row has no session id"))
-     (t
-      (when (yes-or-no-p
-             (format "Forget closed session \"%s\" permanently? " label))
-        (agent-shell-dashboard--forget-session session-id)
-        (agent-shell-dashboard-refresh)
-        (agent-shell-dashboard--goto-row-by-id neighbor-id))))))
+              (ignore-errors (delete-window w))))))
+      (agent-shell-dashboard--forget-session session-id)
+      (agent-shell-dashboard-refresh)
+      (agent-shell-dashboard--goto-row-by-id neighbor-id))))
 
 (defun agent-shell-dashboard-quit ()
   "Bury the dashboard and restore the saved window configuration."
