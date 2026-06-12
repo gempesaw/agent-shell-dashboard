@@ -60,16 +60,26 @@ Submit with `C-c C-c', cancel with `C-c C-k'."
 
 (defun agent-shell-dashboard-start-new-session ()
   "Start a fresh agent-shell session using the first registered config.
-Bypasses the session-resume picker; use `f' on an existing row to
-fork or `r' to reload if you want to attach to prior history."
+When invoked from a dashboard row, the new session is spawned in
+that row's project (cwd); otherwise it uses the current
+`default-directory'.  Bypasses the session-resume picker; use `f'
+on an existing row to fork or `r' to reload if you want to attach
+to prior history."
   (interactive)
   (let* ((entry (car agent-shell-dashboard-identifier-to-config-fn-alist))
          (config-fn (cdr entry))
+         (row (get-text-property (point) 'dg-row))
+         (row-cwd (and row (plist-get row :cwd)))
          (agent-shell-session-strategy 'new))
     (unless config-fn
       (user-error "No agent config registered in %s"
                   'agent-shell-dashboard-identifier-to-config-fn-alist))
-    (agent-shell-start :config (funcall config-fn))))
+    (if (and row-cwd (file-directory-p row-cwd))
+        (let* ((default-directory (file-name-as-directory
+                                    (expand-file-name row-cwd)))
+               (agent-shell-cwd-function (lambda () default-directory)))
+          (agent-shell-start :config (funcall config-fn)))
+      (agent-shell-start :config (funcall config-fn)))))
 
 (defun agent-shell-dashboard-start-new-session-pick-repo ()
   "Pick a project root, then start a new session there."
