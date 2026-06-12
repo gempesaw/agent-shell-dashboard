@@ -25,7 +25,8 @@
     ("s"   "send (viewport)"     agent-shell-dashboard-send)
     ("f"   "fork"                agent-shell-dashboard-fork)
     ("r"   "reload"              agent-shell-dashboard-reload)
-    ("k"   "kill / forget"       agent-shell-dashboard-kill)
+    ("k"   "stop (live only)"    agent-shell-dashboard-stop)
+    ("K"   "forget permanently"  agent-shell-dashboard-forget)
     ("m"   "mark as read"        agent-shell-dashboard-mark-as-read)]
    ["Sessions"
     ("N" "new session"               agent-shell-dashboard-start-new-session)
