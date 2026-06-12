@@ -116,8 +116,10 @@ captures fire when the prompt count is divisible by this value."
                 (forward-line -1))
               (when found-summary
                 (setq agent-shell-dashboard--summary-pending nil)
-                (setq agent-shell-dashboard--buffer-summary
-                      (truncate-string-to-width found-summary 60 nil nil "..."))
+                ;; Store the full captured line.  Column rendering
+                ;; truncates for display; search reads :summary in
+                ;; full so longer tag-lists stay queryable.
+                (setq agent-shell-dashboard--buffer-summary found-summary)
                 (when-let* ((sid (map-nested-elt agent-shell--state '(:session :id))))
                   (agent-shell-dashboard--archive-summary
                    sid agent-shell-dashboard--buffer-summary default-directory))
