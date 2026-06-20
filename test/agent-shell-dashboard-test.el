@@ -145,6 +145,148 @@
   (should-not (agent-shell-dashboard--status-line-p "an actual summary")))
 
 
+;;;; --- Summary capture / restore backfill ---------------------------
+
+(ert-deftest asd-test-check-for-summary-capture-extracts-latest ()
+  "Capture parses the most-recent summary turn out of the buffer text.
+Backward search past an earlier (stale) summary turn must land on
+the newest one, and status spam must be skipped."
+  (with-temp-buffer
+    (setq-local agent-shell--state
+                (list :agent-config (list :shell-prompt "Claude> ")
+                      :session (list :id "sid-1")))
+    (insert "Claude> SUMMARIZE NOW\n"
+            "<shell-maker-end-of-prompt>\n"
+            "- Keywords: stale, old\n\n"
+            "Claude> something unrelated\n"
+            "<shell-maker-end-of-prompt>\n"
+            "a normal answer\n\n"
+            "Claude> SUMMARIZE NOW\n"
+            "<shell-maker-end-of-prompt>\n"
+            "- Keywords: alpha, beta, gamma\n\n"
+            "Claude> ")
+    (let ((agent-shell-dashboard-summary-prompt "SUMMARIZE NOW")
+          (agent-shell-dashboard-summary-archive-file nil))
+      (setq-local agent-shell-dashboard--summary-pending t)
+      (agent-shell-dashboard--check-for-summary-capture)
+      (should (equal agent-shell-dashboard--buffer-summary
+                     "- Keywords: alpha, beta, gamma"))
+      (should-not agent-shell-dashboard--summary-pending))))
+
+(ert-deftest asd-test-check-for-summary-capture-keeps-all-lines ()
+  "Capture stores the whole multi-line response, skipping status spam.
+The thinking indicator and blank lines are dropped; the remaining
+content lines are kept in order."
+  (with-temp-buffer
+    (setq-local agent-shell--state
+                (list :agent-config (list :shell-prompt "Claude> ")
+                      :session (list :id "sid-3")))
+    (insert "Claude> SUMMARIZE NOW\n"
+            "<shell-maker-end-of-prompt>\n"
+            "  💡 Thinking\n\n"
+            "- alpha first thread\n"
+            "- beta second thread\n"
+            "- gamma third thread\n\n"
+            "Claude> ")
+    (let ((agent-shell-dashboard-summary-prompt "SUMMARIZE NOW")
+          (agent-shell-dashboard-summary-archive-file nil))
+      (setq-local agent-shell-dashboard--summary-pending t)
+      (agent-shell-dashboard--check-for-summary-capture)
+      ;; Stored verbatim (UI spam dropped, labels/bullets preserved);
+      ;; cleaning happens at display time, not here.
+      (should (equal agent-shell-dashboard--buffer-summary
+                     "- alpha first thread\n- beta second thread\n- gamma third thread"))
+      (should-not agent-shell-dashboard--summary-pending))))
+
+(ert-deftest asd-test-clean-summary-strips-labels-and-bullets ()
+  "Section headers and bullet markers are stripped; values survive."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "Topics:\n- BYOC bootstrap blast-radius\n- cross-account ECR replication")
+                 "BYOC bootstrap blast-radius\ncross-account ECR replication")))
+
+(ert-deftest asd-test-clean-summary-drops-ticket-noise ()
+  "Ticket scaffolding and \"none\" lines never reach the summary."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  (concat "Linear ticket: none\n"
+                          "- Keywords: alpha, beta\n"
+                          "(No Linear ticket surfaced — PRs modularml/infra#1)"))
+                 "alpha, beta")))
+
+(ert-deftest asd-test-clean-summary-drops-empty-scaffolding-keeps-real ()
+  "Empty ticket/branch scaffolding is dropped; real ids and branches survive."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  (concat "Primary Linear ticket: none referenced\n"
+                          "Branch name: none (no git repo)\n"
+                          "Keywords: alpha; beta"))
+                 "alpha; beta"))
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "Linear ticket: INFRA-2899\nBranch: dg/infra-2899-fix")
+                 "INFRA-2899\ndg/infra-2899-fix")))
+
+(ert-deftest asd-test-clean-summary-excises-forbidden-list-items ()
+  "A forbidden ticket phrase drops only its list item, not the whole line."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "Cloudflare deploy, Linear ticket filing, Buildkite secrets")
+                 "Cloudflare deploy; Buildkite secrets"))
+  ;; A line that is nothing but the forbidden phrase collapses away.
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "Linear ticket discussion only")
+                 "")))
+
+(ert-deftest asd-test-clean-summary-drops-bare-branch-noise ()
+  "A bare default-branch line is dropped; real branches and content survive."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "Branch: main\nKeywords: alpha; beta")
+                 "alpha; beta"))
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "emacs\nagent-shell dashboard work")
+                 "agent-shell dashboard work"))
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "dg/infra-2845-fix\nemacs lisp parser rewrite")
+                 "dg/infra-2845-fix\nemacs lisp parser rewrite")))
+
+(ert-deftest asd-test-clean-summary-keeps-bare-ids-and-tickety-words ()
+  "A bare id is content; \"ticket\" without linear/primary/no is content."
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "INFRA-1234 redeploy via README bump")
+                 "INFRA-1234 redeploy via README bump"))
+  (should (equal (agent-shell-dashboard--clean-summary
+                  "ticketing pipeline rewrite; queue backpressure")
+                 "ticketing pipeline rewrite; queue backpressure")))
+
+(ert-deftest asd-test-collapse-whitespace-flattens ()
+  "Multi-line summaries collapse to a single trimmed line for display."
+  (should (equal (agent-shell-dashboard--collapse-whitespace
+                  "- a: x\n- b: y\n\n- c: z")
+                 "- a: x - b: y - c: z"))
+  (should (equal (agent-shell-dashboard--collapse-whitespace "  hi \n there  ")
+                 "hi there"))
+  (should (equal (agent-shell-dashboard--collapse-whitespace nil) "")))
+
+(ert-deftest asd-test-backfill-extracts-from-replayed-buffer ()
+  "Restore backfill re-parses a replayed summary turn into the buffer.
+A restored session has the summary text in the buffer but a nil
+`agent-shell-dashboard--buffer-summary'; backfill recovers it."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent-shell--state
+                  (list :agent-config (list :shell-prompt "Claude> ")
+                        :session (list :id "sid-2")))
+      (insert "Claude> SUMMARIZE NOW\n"
+              "<shell-maker-end-of-prompt>\n"
+              "- Keywords: delta, epsilon\n\n"
+              "Claude> ")
+      (let ((agent-shell-dashboard-summary-prompt "SUMMARIZE NOW")
+            (agent-shell-dashboard-summary-archive-file nil))
+        (cl-letf (((symbol-function 'agent-shell-dashboard--find-live-buffer-for-session)
+                   (lambda (sid) (and (equal sid "sid-2") buf)))
+                  ((symbol-function 'shell-maker-busy)
+                   (lambda (&rest _) nil)))
+          (agent-shell-dashboard--backfill-summary-from-buffer "sid-2" 10)
+          (should (equal agent-shell-dashboard--buffer-summary
+                         "- Keywords: delta, epsilon")))))))
+
+
 ;;;; --- Jump view string surgery -------------------------------------
 
 (ert-deftest asd-test-place-at-col-pads-when-short ()

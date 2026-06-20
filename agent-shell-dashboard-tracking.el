@@ -44,7 +44,18 @@ captures fire when the prompt count is divisible by this value."
                           (shell-maker--prompt-end-position) (point-max)))))
       (unless (s-blank? input)
         (if (s-equals? input agent-shell-dashboard-summary-prompt)
-            (setq agent-shell-dashboard--summary-pending t)
+            (progn
+              (setq agent-shell-dashboard--summary-pending t)
+              ;; Start polling now, as the summary turn begins — not at
+              ;; queue time.  The request may have waited in the pending
+              ;; queue behind a busy request for minutes, by which point
+              ;; a queue-time poll would long since have exhausted its
+              ;; attempts: it only reschedules while `--summary-pending'
+              ;; is set, and that isn't true until this very submission.
+              (let ((buf (current-buffer)))
+                (run-with-timer 2 nil
+                                #'agent-shell-dashboard--poll-for-summary
+                                buf 30)))
           (setq agent-shell-dashboard--buffer-last-prompt-text input)
           (setq agent-shell-dashboard--buffer-last-prompt-time (current-time))
           (cl-incf agent-shell-dashboard--prompt-count)
@@ -52,19 +63,31 @@ captures fire when the prompt count is divisible by this value."
   (apply orig-fun args))
 
 (defun agent-shell-dashboard--poll-for-summary (buf attempts)
-  "Poll BUF for summary response, up to ATTEMPTS times."
-  (when (and (buffer-live-p buf) (> attempts 0))
+  "Poll BUF for the summary response, up to ATTEMPTS times.
+Captures once the shell is idle; keeps waiting (without consuming
+the idle check) while the summary turn is still running.  Gives up
+when ATTEMPTS run out and clears `--summary-pending' so a summary
+that never parses can't wedge every future capture."
+  (when (buffer-live-p buf)
     (with-current-buffer buf
-      (if (and agent-shell-dashboard--summary-pending (not (shell-maker-busy)))
-          (progn
-            (agent-shell-dashboard--check-for-summary-capture)
-            (when agent-shell-dashboard--summary-pending
-              (run-with-timer 2 nil #'agent-shell-dashboard--poll-for-summary buf (1- attempts))))
+      (cond
+       ((not agent-shell-dashboard--summary-pending))   ; captured or cancelled
+       ((<= attempts 0)
+        (setq agent-shell-dashboard--summary-pending nil))
+       (t
+        (unless (shell-maker-busy)
+          (agent-shell-dashboard--check-for-summary-capture))
         (when agent-shell-dashboard--summary-pending
-          (run-with-timer 2 nil #'agent-shell-dashboard--poll-for-summary buf (1- attempts)))))))
+          (run-with-timer 2 nil
+                          #'agent-shell-dashboard--poll-for-summary
+                          buf (1- attempts))))))))
 
 (defun agent-shell-dashboard--maybe-queue-summary ()
-  "Queue a summary request if conditions are met."
+  "Queue a summary request if conditions are met.
+Polling for the response is started later, by
+`agent-shell-dashboard--track-prompt-submission', when the queued
+request is actually submitted — until then it may sit in the
+pending queue behind a busy request and there is nothing to poll."
   (when (and (derived-mode-p 'agent-shell-mode)
              (not agent-shell-dashboard--summary-pending)
              (or (= agent-shell-dashboard--prompt-count 1)
@@ -74,8 +97,7 @@ captures fire when the prompt count is divisible by this value."
                       (lambda ()
                         (when (buffer-live-p buf)
                           (with-current-buffer buf
-                            (agent-shell-queue-request agent-shell-dashboard-summary-prompt)
-                            (run-with-timer 5 nil #'agent-shell-dashboard--poll-for-summary buf 10))))))))
+                            (agent-shell-queue-request agent-shell-dashboard-summary-prompt))))))))
 
 (defun agent-shell-dashboard--status-line-p (line)
   "Return non-nil if LINE is an agent-shell status message to skip."
@@ -87,6 +109,7 @@ captures fire when the prompt count is divisible by this value."
       (s-starts-with? "Subscribing" line)
       (s-starts-with? "Initializing" line)
       (s-equals? line "Ready")
+      (s-starts-with? "💡" line)
       (s-starts-with? "<shell-maker" line)))
 
 (defun agent-shell-dashboard--check-for-summary-capture ()
@@ -104,26 +127,66 @@ captures fire when the prompt count is divisible by this value."
                    (end (if (re-search-forward prompt-line-re nil t)
                             (match-beginning 0)
                           (point-max)))
-                   (found-summary nil))
-              (goto-char end)
-              (forward-line -1)
-              (while (and (>= (point) start) (not found-summary))
+                   (lines '()))
+              ;; Collect every content line of the response, top to
+              ;; bottom, dropping interleaved status spam.  The summary
+              ;; prompt asks for a multi-line answer (ticket / branch /
+              ;; keywords), so we keep the whole block, not just one line.
+              (goto-char start)
+              (while (< (point) end)
                 (let ((line (s-trim (buffer-substring-no-properties
                                      (line-beginning-position)
                                      (line-end-position)))))
                   (unless (agent-shell-dashboard--status-line-p line)
-                    (setq found-summary line)))
-                (forward-line -1))
-              (when found-summary
+                    (push line lines)))
+                (forward-line 1))
+              (when-let* ((found-summary
+                           (let ((joined (s-trim (s-join "\n" (nreverse lines)))))
+                             (unless (s-blank? joined) joined))))
                 (setq agent-shell-dashboard--summary-pending nil)
-                ;; Store the full captured line.  Column rendering
-                ;; truncates for display; search reads :summary in
-                ;; full so longer tag-lists stay queryable.
+                ;; Store the full multi-line response verbatim (minus UI
+                ;; status spam).  Cleaning is non-destructive and happens
+                ;; at display time (`--clean-summary' + `--collapse-whitespace');
+                ;; search reads :summary in full so the whole block — labels
+                ;; and all — stays queryable.
                 (setq agent-shell-dashboard--buffer-summary found-summary)
                 (when-let* ((sid (map-nested-elt agent-shell--state '(:session :id))))
                   (agent-shell-dashboard--archive-summary
                    sid agent-shell-dashboard--buffer-summary default-directory))
                 (message "Summary for %s: %s" (buffer-name) agent-shell-dashboard--buffer-summary)))))))))
+
+(defun agent-shell-dashboard--backfill-summary-from-buffer (session-id attempts)
+  "Re-extract SESSION-ID's summary from its replayed buffer text.
+Restored sessions re-insert their entire conversation — including
+any summary turn — but never re-run live capture, so the buffer
+holds the summary text while `agent-shell-dashboard--buffer-summary'
+stays nil.  This parses it back out (and archives it via
+`agent-shell-dashboard--check-for-summary-capture').
+
+Retries up to ATTEMPTS times: `agent-shell-start' returns before
+the ACP history replay finishes streaming, so the text — and even
+the buffer's session id — may not be in place on the first pass."
+  (when (> attempts 0)
+    (let ((buf (agent-shell-dashboard--find-live-buffer-for-session session-id)))
+      (cond
+       ((null buf)
+        ;; Session/buffer not materialized yet — wait for replay.
+        (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
+                        session-id (1- attempts)))
+       (t
+        (with-current-buffer buf
+          (cond
+           (agent-shell-dashboard--buffer-summary)   ; already have one
+           ((shell-maker-busy)                       ; replay still streaming
+            (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
+                            session-id (1- attempts)))
+           (t
+            (setq agent-shell-dashboard--summary-pending t)
+            (agent-shell-dashboard--check-for-summary-capture)
+            (unless agent-shell-dashboard--buffer-summary
+              (setq agent-shell-dashboard--summary-pending nil)
+              (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
+                              session-id (1- attempts)))))))))))
 
 (defun agent-shell-dashboard--after-response-hook (orig-fun &rest args)
   "Advice to capture summary after any response completes."
@@ -230,7 +293,8 @@ ACP-SESSION is the alist describing the session being labelled."
       (let* ((id (map-elt acp-session 'sessionId))
              (summaries (agent-shell-dashboard--all-known-summaries))
              (s (and id (ht-get summaries id))))
-        (or s ""))
+        (agent-shell-dashboard--collapse-whitespace
+         (agent-shell-dashboard--clean-summary s)))
     (funcall orig-fun column acp-session)))
 
 (defun agent-shell-dashboard--session-column-face-advice (orig-fun column)
@@ -272,14 +336,20 @@ whose cwd no longer exists."
                  (agent-shell-cwd-function (lambda () cwd))
                  (config (funcall config-fn)))
             (agent-shell-start :config config :session-id session-id)
-            (when summary
-              (dolist (buf (agent-shell-dashboard--all-buffers))
-                (with-current-buffer buf
-                  (when (and (not agent-shell-dashboard--buffer-summary)
-                             (equal session-id
-                                    (map-nested-elt agent-shell--state
-                                                    '(:session :id))))
-                    (setq-local agent-shell-dashboard--buffer-summary summary))))))
+            (if summary
+                (dolist (buf (agent-shell-dashboard--all-buffers))
+                  (with-current-buffer buf
+                    (when (and (not agent-shell-dashboard--buffer-summary)
+                               (equal session-id
+                                      (map-nested-elt agent-shell--state
+                                                      '(:session :id))))
+                      (setq-local agent-shell-dashboard--buffer-summary summary))))
+              ;; No summary was saved, but the replay re-inserts any
+              ;; summary turn from history; parse it back out once that
+              ;; text lands.
+              (run-with-timer 3 nil
+                              #'agent-shell-dashboard--backfill-summary-from-buffer
+                              session-id 10)))
           (cl-incf restored)))))
     (message "agent-shell: restored %d session%s, skipped %d"
              restored (if (= 1 restored) "" "s") skipped)))

@@ -84,6 +84,90 @@ Used when resuming a session into a new buffer."
   :type '(alist :key-type symbol :value-type function)
   :group 'agent-shell-dashboard)
 
+(defconst agent-shell-dashboard--summary-bullet-re
+  (rx bos (any "-*•") (* space))
+  "Leading list bullet to strip from a captured summary line.")
+
+(defconst agent-shell-dashboard--summary-label-keyword-re
+  (rx (or "ticket" "branch" "topic" "keyword" "tag"
+          "summary" "session" "headline"))
+  "Words that mark a `Foo:' prefix as a section label, not content.
+A leading `label:' is stripped only when the text before the colon
+contains one of these (so \"Branch name: X\" loses the label but
+\"fix: parser\" keeps it).")
+
+(defconst agent-shell-dashboard--summary-nothing-re
+  (rx bos (or "none" "n/a" "n.a" "tbd" (seq "no" word-boundary)))
+  "A line that, once delabelled, conveys nothing and should be dropped.
+Catches \"none\", \"none referenced\", \"none (…)\", \"no branch
+created\", etc., without touching real words like \"Node\".")
+
+(defconst agent-shell-dashboard--summary-branch-noise-re
+  (rx bos (or "main" "master" "emacs" "develop" "trunk")
+      (* space) (? (seq "(" (* nonl))) eos)
+  "A line that is just a default branch name (optionally parenthesised).
+Legacy summaries led with \"Branch: main\"; once delabelled the bare
+\"main\"/\"emacs\" only wastes the row.  Real branch names like
+\"dg/infra-2845-…\" and content that merely starts with these words
+survive.")
+
+(defconst agent-shell-dashboard--summary-forbidden-re
+  (rx (or "linear" "primary") (+ space) "ticket")
+  "Phrases the user never wants to see — a hard safety net.
+Any surviving line matching this is dropped wholesale, covering
+\"Linear ticket\", \"primary ticket\" and the \"no linear ticket\"
+boilerplate even when it appears mid-line.")
+
+(defun agent-shell-dashboard--clean-summary (text)
+  "Strip label scaffolding and ticket boilerplate from captured TEXT.
+For each line: drop a leading bullet, strip a leading `label:'
+segment when the label word is scaffolding (ticket/branch/topic/…),
+then discard the line if what remains is a nothing-value (\"none\",
+\"no branch\"…) or still names a linear/primary ticket.  The user
+wants the substance, never the scaffolding."
+  (let* ((case-fold-search t)
+         (cleaned
+          (--keep
+           (let* ((l (s-trim it))
+                  (l (s-trim (replace-regexp-in-string
+                              agent-shell-dashboard--summary-bullet-re "" l)))
+                  (colon (string-match ":" l)))
+             ;; Strip a leading "<label>:" when the label is scaffolding
+             ;; and the colon is early enough to be a label, not prose.
+             (when (and colon (<= colon 28)
+                        (string-match-p
+                         agent-shell-dashboard--summary-label-keyword-re
+                         (downcase (substring l 0 colon))))
+               (setq l (s-trim (substring l (1+ colon)))))
+             ;; Excise only the comma/semicolon items that name a
+             ;; linear/primary ticket, so a keyword list keeps its other
+             ;; items and a pure "(No Linear ticket surfaced…)" filler
+             ;; line collapses to nothing (and is dropped below).
+             (when (string-match-p agent-shell-dashboard--summary-forbidden-re
+                                   (downcase l))
+               (setq l (s-trim
+                        (s-join "; "
+                                (--remove
+                                 (string-match-p
+                                  agent-shell-dashboard--summary-forbidden-re
+                                  (downcase it))
+                                 (split-string l "[,;]" t "[ \t]*"))))))
+             (let ((low (downcase l)))
+               (cond
+                ((s-blank? l) nil)
+                ((string-match-p agent-shell-dashboard--summary-nothing-re low) nil)
+                ((string-match-p agent-shell-dashboard--summary-branch-noise-re low) nil)
+                (t l))))
+           (split-string (or text "") "\n"))))
+    (s-trim (s-join "\n" cleaned))))
+
+(defun agent-shell-dashboard--collapse-whitespace (str)
+  "Collapse every run of whitespace in STR to a single space, trimmed.
+Summaries and last-prompts are stored with their original newlines
+for search and the session picker; this renders them onto a single
+dashboard grid row without breaking column alignment."
+  (s-trim (s-replace-regexp "[ \t\n\r]+" " " (or str ""))))
+
 (defun agent-shell-dashboard--all-buffers ()
   "Return all live agent-shell-mode buffers."
   (--filter (with-current-buffer it (derived-mode-p 'agent-shell-mode))

@@ -142,9 +142,11 @@ Each cell is a plist with :string and :row keys."
          (activity (or (agent-shell-dashboard--format-relative-time
                         (agent-shell-dashboard--row-time row))
                        (if (eq status 'closed) "closed" "—")))
-         (summary (or (plist-get row :summary) ""))
-         (preview (s-replace-regexp "[ \t\n\r]+" " "
-                                    (or (plist-get row :last-prompt-text) "")))
+         (summary (agent-shell-dashboard--collapse-whitespace
+                   (agent-shell-dashboard--clean-summary
+                    (plist-get row :summary))))
+         (preview (agent-shell-dashboard--collapse-whitespace
+                   (plist-get row :last-prompt-text)))
          (line1 (format "  %s  %-7s  %s"
                         glyph
                         (propertize activity 'face 'shadow)
