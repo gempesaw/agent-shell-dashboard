@@ -263,6 +263,39 @@ content lines are kept in order."
                  "hi there"))
   (should (equal (agent-shell-dashboard--collapse-whitespace nil) "")))
 
+(ert-deftest asd-test-replayed-submission-p ()
+  "Only input carrying the end-of-prompt marker counts as a replay."
+  (should (agent-shell-dashboard--replayed-submission-p
+           "summary\n<shell-maker-end-of-prompt>\n  💡 Thinking"))
+  (should-not (agent-shell-dashboard--replayed-submission-p
+               "why isn't karpenter consolidating these nodes?")))
+
+(ert-deftest asd-test-backfill-gives-up-on-idle-buffer-without-summary ()
+  "An idle resumed buffer with no summary turn is left alone, not polled."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent-shell--state
+                  (list :agent-config (list :shell-prompt "Claude> ")
+                        :session (list :id "sid-x")))
+      (insert "Claude> just a normal turn\n"
+              "<shell-maker-end-of-prompt>\n"
+              "a normal answer\n\nClaude> ")
+      (let ((agent-shell-dashboard-summary-prompt "SUMMARIZE NOW")
+            (agent-shell-dashboard-summary-archive-file nil))
+        (cl-letf (((symbol-function 'agent-shell-dashboard--find-live-buffer-for-session)
+                   (lambda (sid) (and (equal sid "sid-x") buf)))
+                  ((symbol-function 'shell-maker-busy) (lambda (&rest _) nil)))
+          (agent-shell-dashboard--backfill-summary-from-buffer "sid-x" 12)
+          (should-not agent-shell-dashboard--buffer-summary)
+          (should-not agent-shell-dashboard--summary-pending))))))
+
+(ert-deftest asd-test-backfill-on-init-finished-ignores-other-events ()
+  "The resume hook only reacts to `init-finished'."
+  (with-temp-buffer
+    (setq-local agent-shell--state
+                (list :session (list :id "sid-y")))
+    (should-not (agent-shell-dashboard--backfill-on-init-finished :event 'turn-complete))))
+
 (ert-deftest asd-test-backfill-extracts-from-replayed-buffer ()
   "Restore backfill re-parses a replayed summary turn into the buffer.
 A restored session has the summary text in the buffer but a nil

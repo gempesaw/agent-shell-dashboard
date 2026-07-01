@@ -37,12 +37,22 @@ captures fire when the prompt count is divisible by this value."
   :type 'integer
   :group 'agent-shell-dashboard)
 
+(defun agent-shell-dashboard--replayed-submission-p (input)
+  "Return non-nil if INPUT is a replayed turn rather than a live submit.
+Replayed turns (native session resume/load) carry the whole turn —
+including the `<shell-maker-end-of-prompt>' marker — while a live
+submission is read before that marker is inserted."
+  (s-contains? "<shell-maker-end-of-prompt>" input))
+
 (defun agent-shell-dashboard--track-prompt-submission (orig-fun &rest args)
   "Advice around `shell-maker-submit' to track prompts and capture last prompt."
   (when (derived-mode-p 'agent-shell-mode)
     (let ((input (s-trim (buffer-substring-no-properties
                           (shell-maker--prompt-end-position) (point-max)))))
-      (unless (s-blank? input)
+      (unless (or (s-blank? input)
+                  ;; Never track a replayed turn (native session
+                  ;; resume/load): it corrupts last-prompt and count.
+                  (agent-shell-dashboard--replayed-submission-p input))
         (if (s-equals? input agent-shell-dashboard-summary-prompt)
             (progn
               (setq agent-shell-dashboard--summary-pending t)
@@ -157,15 +167,17 @@ pending queue behind a busy request and there is nothing to poll."
 
 (defun agent-shell-dashboard--backfill-summary-from-buffer (session-id attempts)
   "Re-extract SESSION-ID's summary from its replayed buffer text.
-Restored sessions re-insert their entire conversation — including
-any summary turn — but never re-run live capture, so the buffer
-holds the summary text while `agent-shell-dashboard--buffer-summary'
-stays nil.  This parses it back out (and archives it via
+Resumed/restored sessions re-insert their entire conversation —
+including any summary turn — but never set `--summary-pending', so
+live capture misses it while the buffer holds the text.  This
+parses it back out (and archives it via
 `agent-shell-dashboard--check-for-summary-capture').
 
-Retries up to ATTEMPTS times: `agent-shell-start' returns before
-the ACP history replay finishes streaming, so the text — and even
-the buffer's session id — may not be in place on the first pass."
+Retries up to ATTEMPTS times only while the buffer has not
+materialized yet or the ACP replay is still streaming (shell busy).
+Once the shell is idle it does a single extraction: if no summary
+turn is present the session simply has none (e.g. a fresh session),
+so it stops rather than polling forever."
   (when (> attempts 0)
     (let ((buf (agent-shell-dashboard--find-live-buffer-for-session session-id)))
       (cond
@@ -181,12 +193,28 @@ the buffer's session id — may not be in place on the first pass."
             (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
                             session-id (1- attempts)))
            (t
+            ;; Replay finished (or nothing to replay).  One extraction
+            ;; attempt; whatever it finds — a summary or nothing — is
+            ;; final, so don't keep polling an idle session.
             (setq agent-shell-dashboard--summary-pending t)
             (agent-shell-dashboard--check-for-summary-capture)
             (unless agent-shell-dashboard--buffer-summary
-              (setq agent-shell-dashboard--summary-pending nil)
-              (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
-                              session-id (1- attempts)))))))))))
+              (setq agent-shell-dashboard--summary-pending nil))))))))))
+
+(defun agent-shell-dashboard--backfill-on-init-finished (&rest args)
+  "Re-parse a resumed session's summary once its init finishes.
+Advice on `agent-shell--emit-event'.  Native `agent-shell' session
+resume/load replays the whole conversation (summary turn included)
+but never sets `--summary-pending', and only the dashboard's own
+`agent-shell-dashboard-restore-active-sessions' wired in a backfill.
+Hook the agent's `init-finished' event so every resume — however it
+was started — gets the same treatment.  Harmless for fresh sessions:
+the backfill finds no summary turn and stops."
+  (when (eq (plist-get args :event) 'init-finished)
+    (when-let* ((sid (map-nested-elt (agent-shell--state) '(:session :id))))
+      (unless agent-shell-dashboard--buffer-summary
+        (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
+                        sid 12)))))
 
 (defun agent-shell-dashboard--after-response-hook (orig-fun &rest args)
   "Advice to capture summary after any response completes."
@@ -357,7 +385,8 @@ whose cwd no longer exists."
 (defun agent-shell-dashboard-setup ()
   "Install the dashboard's tracking machinery.
 Adds advice on `shell-maker-submit', `agent-shell-queue-request',
-`agent-shell--process-pending-request', `agent-shell--clean-up',
+`agent-shell--process-pending-request', `agent-shell--emit-event'
+\(to backfill summaries on any session resume), `agent-shell--clean-up',
 and the three session-picker hooks.  Adds `kill-emacs-hook' and
 `kill-buffer-hook' for active-sessions persistence.
 
@@ -367,6 +396,7 @@ opt into automatic summary capture and active-session tracking."
   (advice-add 'shell-maker-submit               :around #'agent-shell-dashboard--track-prompt-submission)
   (advice-add 'agent-shell-queue-request        :around #'agent-shell-dashboard--track-queue-request)
   (advice-add 'agent-shell--process-pending-request :around #'agent-shell-dashboard--after-response-hook)
+  (advice-add 'agent-shell--emit-event          :after  #'agent-shell-dashboard--backfill-on-init-finished)
   (advice-add 'agent-shell--clean-up            :around #'agent-shell-dashboard--safe-clean-up)
   (advice-add 'agent-shell--session-selection-columns :filter-return #'agent-shell-dashboard--session-selection-columns-advice)
   (advice-add 'agent-shell--session-column-value :around #'agent-shell-dashboard--session-column-value-advice)
@@ -381,6 +411,7 @@ opt into automatic summary capture and active-session tracking."
   (advice-remove 'shell-maker-submit               #'agent-shell-dashboard--track-prompt-submission)
   (advice-remove 'agent-shell-queue-request        #'agent-shell-dashboard--track-queue-request)
   (advice-remove 'agent-shell--process-pending-request #'agent-shell-dashboard--after-response-hook)
+  (advice-remove 'agent-shell--emit-event          #'agent-shell-dashboard--backfill-on-init-finished)
   (advice-remove 'agent-shell--clean-up            #'agent-shell-dashboard--safe-clean-up)
   (advice-remove 'agent-shell--session-selection-columns #'agent-shell-dashboard--session-selection-columns-advice)
   (advice-remove 'agent-shell--session-column-value #'agent-shell-dashboard--session-column-value-advice)
