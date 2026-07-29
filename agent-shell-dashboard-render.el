@@ -27,6 +27,19 @@
 (defvar-local agent-shell-dashboard--row-status-overlays nil
   "Persistent overlays applied to working / permission rows on render.")
 
+(defvar-local agent-shell-dashboard--fork-index nil
+  "Hash of session-id -> fork-group index for the current render.
+Only session-ids with two or more live buffers (i.e. forks sharing an
+id) appear.  Rebuilt each `agent-shell-dashboard-refresh'.")
+
+(defcustom agent-shell-dashboard-fork-colors
+  '("#ff6ac1" "#57c7ff" "#5af78e" "#ffb86c" "#bd93f9" "#ff5555" "#8be9fd")
+  "Foreground colors cycled across distinct fork groups.
+Each group of forked sessions gets one color; both members of a pair
+share it, so two independent forks never look like one group of four."
+  :type '(repeat color)
+  :group 'agent-shell-dashboard)
+
 (defface agent-shell-dashboard-working-row-face
   '((((background dark))  :background "#1f2d3d")
     (((background light)) :background "#e7eef6"))
@@ -133,6 +146,33 @@ to distinguish today's killed sessions from older archived ones."
                                           'shadow)))
     (_           (propertize "·" 'face 'shadow))))
 
+(defun agent-shell-dashboard--compute-fork-index (rows)
+  "Return a hash of session-id -> group index for forked live ROWS.
+A session-id counts as forked when two or more of ROWS with that id
+have a live buffer.  Indices are assigned in session-id order so the
+same fork keeps the same color across refreshes."
+  (let ((counts (ht-create)))
+    (dolist (row rows)
+      (when (plist-get row :buffer)
+        (let ((id (plist-get row :session-id)))
+          (when id
+            (ht-set! counts id (1+ (ht-get counts id 0)))))))
+    (let ((idx (ht-create))
+          (fork-ids (sort (--filter (>= (ht-get counts it) 2) (ht-keys counts))
+                          #'string<)))
+      (--each-indexed fork-ids (ht-set! idx it it-index))
+      idx)))
+
+(defun agent-shell-dashboard--fork-badge (index)
+  "Return a colored badge string for fork-group INDEX, or nil.
+The fork glyph plus a per-group letter; the letter disambiguates
+groups even where colors are hard to tell apart."
+  (when index
+    (let ((color (nth (mod index (length agent-shell-dashboard-fork-colors))
+                      agent-shell-dashboard-fork-colors)))
+      (propertize (format "⑂%c " (+ ?a (mod index 26)))
+                  'face (list :foreground color :weight 'bold)))))
+
 (defun agent-shell-dashboard--row-cells (row width)
   "Return two cells (line1 line2) representing ROW, each WIDTH-wide.
 Each cell is a plist with :string and :row keys."
@@ -142,9 +182,15 @@ Each cell is a plist with :string and :row keys."
          (activity (or (agent-shell-dashboard--format-relative-time
                         (agent-shell-dashboard--row-time row))
                        (if (eq status 'closed) "closed" "—")))
-         (summary (agent-shell-dashboard--collapse-whitespace
-                   (agent-shell-dashboard--clean-summary
-                    (plist-get row :summary))))
+         (fork-badge (agent-shell-dashboard--fork-badge
+                      (and agent-shell-dashboard--fork-index
+                           (ht-get agent-shell-dashboard--fork-index
+                                   (plist-get row :session-id)))))
+         (summary (concat
+                   fork-badge
+                   (agent-shell-dashboard--collapse-whitespace
+                    (agent-shell-dashboard--clean-summary
+                     (plist-get row :summary)))))
          (preview (agent-shell-dashboard--collapse-whitespace
                    (plist-get row :last-prompt-text)))
          (line1 (format "  %s  %-7s  %s"
@@ -336,6 +382,8 @@ exist than fit horizontally, extra projects wrap to a second band."
                         (plist-get (get-text-property (point) 'dg-row)
                                    :session-id)))
          (rows (agent-shell-dashboard--rows))
+         (_ (setq agent-shell-dashboard--fork-index
+                  (agent-shell-dashboard--compute-fork-index rows)))
          (live (--filter (plist-get it :buffer) rows))
          (closed (--remove (plist-get it :buffer) rows))
          (groups (agent-shell-dashboard--group-rows rows))
