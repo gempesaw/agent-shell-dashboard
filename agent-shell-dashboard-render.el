@@ -46,35 +46,29 @@ share it, so two independent forks never look like one group of four."
 ;; the "you" states lean warm/magenta, the machine state leans cool
 ;; indigo, and staleness is the only thing allowed to recede.
 
-(defface agent-shell-dashboard-permission-row-face
+(defface agent-shell-dashboard-awaiting-row-face
   '((((background dark))  :background "#7d3a6a")
     (((background light)) :background "#ffd9ef"))
-  "Persistent row background for sessions awaiting a permission decision.
-Hottest tint in the palette: this is the one state that blocks."
-  :group 'agent-shell-dashboard)
-
-(defface agent-shell-dashboard-awaiting-row-face
-  '((((background dark))  :background "#6b3f7d")
-    (((background light)) :background "#f3e0ff"))
   "Persistent row background for sessions whose agent finished
 recently and are waiting for the user's next prompt.
-Orchid, to read as `your turn' alongside the hotter permission rose."
-  :group 'agent-shell-dashboard)
-
-(defface agent-shell-dashboard-working-row-face
-  '((((background dark))  :background "#3f3a6e")
-    (((background light)) :background "#e2e4ff"))
-  "Persistent row background for sessions currently working.
-Cool indigo, so the machine-is-busy state recedes behind the two
-states that actually want the user."
+Hottest tint in the palette — this is the state that actually wants
+the user, so it gets the strongest rose."
   :group 'agent-shell-dashboard)
 
 (defface agent-shell-dashboard-recent-row-face
+  '((((background dark))  :background "#6b3f7d")
+    (((background light)) :background "#f3e0ff"))
+  "Persistent row background for idle sessions touched within
+`agent-shell-dashboard-recent-interaction-seconds'.  Orchid: one clear
+step down from the rose of `your turn'."
+  :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-today-row-face
   '((((background dark))  :background "#645a86")
     (((background light)) :background "#efeaff"))
-  "Persistent row background for idle sessions touched within
-`agent-shell-dashboard-recent-interaction-seconds'.  A gentle lift off
-the background: present without competing with the active states."
+  "Persistent row background for live sessions touched earlier today.
+A gentle lift off the background — still in play, but past the
+recent-interaction window."
   :group 'agent-shell-dashboard)
 
 (defface agent-shell-dashboard-stale-row-face
@@ -82,6 +76,24 @@ the background: present without competing with the active states."
     (((background light)) :background "#eceaf0"))
   "Persistent row background for live sessions last touched before today.
 Desaturated and recessed, so yesterday's threads sink behind today's."
+  :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-working-row-face
+  '((((background dark))  :background "#3f3a6e")
+    (((background light)) :background "#e2e4ff"))
+  "Persistent row background for sessions currently working.
+Cool indigo, off the warm axis entirely: the agent is busy and this is
+the one state that is not about the user."
+  :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-permission-row-face
+  '((((background dark))  :background "#9c3350")
+    (((background light)) :background "#ffd2d9"))
+  "Persistent row background for sessions awaiting a permission decision.
+Dormant unless `agent-shell-dashboard--buffer-status' is overridden to
+detect pending permission requests, which the public package does not
+do.  Kept distinct from the awaiting rose so the two never collide if
+that detection is ever wired up."
   :group 'agent-shell-dashboard)
 
 (defcustom agent-shell-dashboard-recent-interaction-seconds 3600
@@ -153,20 +165,18 @@ row at point."
              ;; shadowed glyph.
              (recency (and row (plist-get row :buffer)
                            (agent-shell-dashboard--row-recency row)))
+             (status (and row (plist-get row :status)))
              (face
-              (and row
-                   (pcase (plist-get row :status)
-                     ('permission 'agent-shell-dashboard-permission-row-face)
-                     ('working    'agent-shell-dashboard-working-row-face)
-                     ('awaiting
-                      (if (eq recency 'recent)
-                          'agent-shell-dashboard-awaiting-row-face
-                        (when (eq recency 'older)
-                          'agent-shell-dashboard-stale-row-face)))
-                     (_
-                      (pcase recency
-                        ('recent 'agent-shell-dashboard-recent-row-face)
-                        ('older  'agent-shell-dashboard-stale-row-face)))))))
+              (cond
+               ((null row) nil)
+               ((eq status 'permission) 'agent-shell-dashboard-permission-row-face)
+               ((eq status 'working)    'agent-shell-dashboard-working-row-face)
+               ((and (eq status 'awaiting) (eq recency 'recent))
+                'agent-shell-dashboard-awaiting-row-face)
+               (t (pcase recency
+                    ('recent 'agent-shell-dashboard-recent-row-face)
+                    ('today  'agent-shell-dashboard-today-row-face)
+                    ('older  'agent-shell-dashboard-stale-row-face))))))
         (when face
           (let ((ov (make-overlay pos next)))
             (overlay-put ov 'face face)
