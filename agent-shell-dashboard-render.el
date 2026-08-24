@@ -40,25 +40,68 @@ share it, so two independent forks never look like one group of four."
   :type '(repeat color)
   :group 'agent-shell-dashboard)
 
-(defface agent-shell-dashboard-working-row-face
-  '((((background dark))  :background "#1f2d3d")
-    (((background light)) :background "#e7eef6"))
-  "Persistent row background for sessions currently working."
-  :group 'agent-shell-dashboard)
+;; Row tints all sit in the violet -> magenta arc and differ by hue and
+;; lift rather than by going dark.  On fairyfloss's #5A5475 background a
+;; darker tint just reads as mud (dark gold over purple turns brown), so
+;; the "you" states lean warm/magenta, the machine state leans cool
+;; indigo, and staleness is the only thing allowed to recede.
 
 (defface agent-shell-dashboard-permission-row-face
-  '((((background dark))  :background "#3a2a1a")
-    (((background light)) :background "#f4ece0"))
-  "Persistent row background for sessions awaiting a permission decision."
+  '((((background dark))  :background "#7d3a6a")
+    (((background light)) :background "#ffd9ef"))
+  "Persistent row background for sessions awaiting a permission decision.
+Hottest tint in the palette: this is the one state that blocks."
   :group 'agent-shell-dashboard)
 
 (defface agent-shell-dashboard-awaiting-row-face
-  '((((background dark))  :background "#5e5028")
-    (((background light)) :background "#fef9b8"))
+  '((((background dark))  :background "#6b3f7d")
+    (((background light)) :background "#f3e0ff"))
   "Persistent row background for sessions whose agent finished
 recently and are waiting for the user's next prompt.
-Gold-tinted to read as `your turn' on the fairyfloss palette."
+Orchid, to read as `your turn' alongside the hotter permission rose."
   :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-working-row-face
+  '((((background dark))  :background "#3f3a6e")
+    (((background light)) :background "#e2e4ff"))
+  "Persistent row background for sessions currently working.
+Cool indigo, so the machine-is-busy state recedes behind the two
+states that actually want the user."
+  :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-recent-row-face
+  '((((background dark))  :background "#645a86")
+    (((background light)) :background "#efeaff"))
+  "Persistent row background for idle sessions touched within
+`agent-shell-dashboard-recent-interaction-seconds'.  A gentle lift off
+the background: present without competing with the active states."
+  :group 'agent-shell-dashboard)
+
+(defface agent-shell-dashboard-stale-row-face
+  '((((background dark))  :background "#4e485f")
+    (((background light)) :background "#eceaf0"))
+  "Persistent row background for live sessions last touched before today.
+Desaturated and recessed, so yesterday's threads sink behind today's."
+  :group 'agent-shell-dashboard)
+
+(defcustom agent-shell-dashboard-recent-interaction-seconds 3600
+  "Age in seconds under which a session counts as recently interacted with.
+Rows younger than this get `agent-shell-dashboard-recent-row-face'."
+  :type 'integer
+  :group 'agent-shell-dashboard)
+
+(defun agent-shell-dashboard--row-recency (row)
+  "Return `recent', `today', or `older' for ROW's last activity, or nil.
+`recent' is within `agent-shell-dashboard-recent-interaction-seconds';
+`today' is the rest of the current calendar day; `older' is anything
+before that."
+  (when-let* ((time (agent-shell-dashboard--row-time row)))
+    (cond
+     ((< (float-time (time-subtract (current-time) time))
+         agent-shell-dashboard-recent-interaction-seconds)
+      'recent)
+     ((agent-shell-dashboard--row-is-today row) 'today)
+     (t 'older))))
 
 (defcustom agent-shell-dashboard-jump-keys
   "asdfjkl;qwertyuiopzxcvbnm"
@@ -100,11 +143,30 @@ row at point."
     (while (< pos max)
       (let* ((next (or (next-single-property-change pos 'dg-row) max))
              (row (get-text-property pos 'dg-row))
-             (face (and row
-                        (pcase (plist-get row :status)
-                          ('working    'agent-shell-dashboard-working-row-face)
-                          ('permission 'agent-shell-dashboard-permission-row-face)
-                          ('awaiting   'agent-shell-dashboard-awaiting-row-face)))))
+             ;; Blocking and busy states always win.  `awaiting' only
+             ;; tints while it is still fresh: it fires for any idle
+             ;; session with unread history, so on a busy dashboard nearly
+             ;; every row qualifies and the tint stops discriminating —
+             ;; gating it on recency keeps "your turn" meaningful and lets
+             ;; older threads fall through to the recency bands.  Closed
+             ;; rows stay untinted; they already sort last and carry a
+             ;; shadowed glyph.
+             (recency (and row (plist-get row :buffer)
+                           (agent-shell-dashboard--row-recency row)))
+             (face
+              (and row
+                   (pcase (plist-get row :status)
+                     ('permission 'agent-shell-dashboard-permission-row-face)
+                     ('working    'agent-shell-dashboard-working-row-face)
+                     ('awaiting
+                      (if (eq recency 'recent)
+                          'agent-shell-dashboard-awaiting-row-face
+                        (when (eq recency 'older)
+                          'agent-shell-dashboard-stale-row-face)))
+                     (_
+                      (pcase recency
+                        ('recent 'agent-shell-dashboard-recent-row-face)
+                        ('older  'agent-shell-dashboard-stale-row-face)))))))
         (when face
           (let ((ov (make-overlay pos next)))
             (overlay-put ov 'face face)
@@ -135,15 +197,13 @@ visible (working / permission / awaiting tints)."
 If IS-TODAY is non-nil, closed rows are rendered in a brighter face
 to distinguish today's killed sessions from older archived ones."
   (pcase status
-    ('ready      (propertize "●" 'face 'success))
-    ('awaiting   (propertize "◉" 'face '(:inherit font-lock-variable-name-face
-                                          :weight bold)))
-    ('working    (propertize "▶" 'face '(:inherit font-lock-keyword-face
-                                          :weight bold)))
-    ('permission (propertize "!" 'face '(:inherit warning :weight bold)))
+    ('ready      (propertize "●" 'face '(:foreground "#c5a3ff")))
+    ('awaiting   (propertize "◉" 'face '(:foreground "#ffb8d1" :weight bold)))
+    ('working    (propertize "▶" 'face '(:foreground "#a8b6ff" :weight bold)))
+    ('permission (propertize "!" 'face '(:foreground "#ff8fc8" :weight bold)))
     ('closed     (propertize "○" 'face (if is-today
-                                            'font-lock-string-face
-                                          'shadow)))
+                                           '(:foreground "#b8a2ce")
+                                         'shadow)))
     (_           (propertize "·" 'face 'shadow))))
 
 (defun agent-shell-dashboard--compute-fork-index (rows)
