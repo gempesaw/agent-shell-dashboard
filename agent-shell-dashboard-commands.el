@@ -36,6 +36,10 @@
     (define-key map (kbd "j")   #'agent-shell-dashboard-jump)
     (define-key map (kbd "r")   #'agent-shell-dashboard-reload)
     (define-key map (kbd "/")   #'agent-shell-dashboard-search)
+    (define-key map (kbd "SPC") #'agent-shell-dashboard-toggle-mark)
+    (define-key map (kbd "u")   #'agent-shell-dashboard-unmark)
+    (define-key map (kbd "U")   #'agent-shell-dashboard-unmark-all)
+    (define-key map (kbd "w")   #'agent-shell-dashboard-show-marked)
     map)
   "Keymap for `agent-shell-dashboard-mode'.")
 
@@ -306,11 +310,108 @@ to the tombstone so JSONL enumeration won't resurface the row."
     (quit-window)
     (when cfg (set-window-configuration cfg))))
 
+;;; Marking and the marked-session layout
+
+(defcustom agent-shell-dashboard-layout-max-columns 4
+  "Most columns the marked-session layout will use.
+Beyond this many marked sessions the layout starts stacking rows
+within each column instead of adding more columns."
+  :type 'integer
+  :group 'agent-shell-dashboard)
+
+(defun agent-shell-dashboard-toggle-mark ()
+  "Toggle the mark on the row at point and advance."
+  (interactive)
+  (let* ((row (agent-shell-dashboard--row-at-point))
+         (sid (or (plist-get row :session-id)
+                  (user-error "Row has no session id")))
+         (marked (agent-shell-dashboard--toggle-mark sid)))
+    (agent-shell-dashboard-refresh)
+    (agent-shell-dashboard--goto-row-by-id sid)
+    (agent-shell-dashboard-next)
+    (message "%s (%d marked)"
+             (if marked "Marked" "Unmarked")
+             (length agent-shell-dashboard--marked-ids))))
+
+(defun agent-shell-dashboard-unmark ()
+  "Remove the mark from the row at point."
+  (interactive)
+  (let* ((row (agent-shell-dashboard--row-at-point))
+         (sid (plist-get row :session-id)))
+    (when (agent-shell-dashboard-marked-p sid)
+      (agent-shell-dashboard--set-marks
+       (remove sid agent-shell-dashboard--marked-ids)))
+    (agent-shell-dashboard-refresh)
+    (agent-shell-dashboard--goto-row-by-id sid)))
+
+(defun agent-shell-dashboard-unmark-all ()
+  "Clear every mark."
+  (interactive)
+  (agent-shell-dashboard--set-marks nil)
+  (agent-shell-dashboard-refresh)
+  (message "Cleared all marks"))
+
+(defun agent-shell-dashboard--marked-buffers ()
+  "Live buffers for the marked sessions, in mark order.
+Marked sessions whose buffer is gone are skipped rather than resumed;
+resuming would start processes as a side effect of arranging windows."
+  (let (buffers missing)
+    (dolist (sid (agent-shell-dashboard--ensure-marks))
+      (if-let* ((buf (agent-shell-dashboard--find-live-buffer-for-session sid)))
+          (push buf buffers)
+        (push sid missing)))
+    (when missing
+      (message "%d marked session(s) have no live buffer; skipped"
+               (length missing)))
+    (nreverse buffers)))
+
+(defun agent-shell-dashboard--layout-distribution (n ncols)
+  "Split N windows across NCOLS columns, leftmost columns taking extras.
+Five across four columns gives (2 1 1 1): the first column stacks two
+rows and the rest stay single."
+  (let ((base (/ n ncols))
+        (extra (% n ncols)))
+    (cl-loop for i from 0 below ncols
+             collect (+ base (if (< i extra) 1 0)))))
+
+(defun agent-shell-dashboard--split-n (window n side)
+  "Split WINDOW into N windows along SIDE, returned in visual order.
+Sizes are left uneven here and evened out by `balance-windows'."
+  (let ((wins (list window)))
+    (dotimes (_ (1- n))
+      (setq wins (nconc wins (list (split-window (car (last wins)) nil side)))))
+    wins))
+
+(defun agent-shell-dashboard-show-marked ()
+  "Take over the frame with one window per marked session.
+Up to `agent-shell-dashboard-layout-max-columns' marked sessions each
+get their own column; beyond that, columns start stacking rows."
+  (interactive)
+  (let* ((buffers (agent-shell-dashboard--marked-buffers))
+         (n (length buffers)))
+    (unless buffers
+      (user-error "No marked sessions with live buffers"))
+    (let* ((ncols (min agent-shell-dashboard-layout-max-columns n))
+           (dist (agent-shell-dashboard--layout-distribution n ncols))
+           (rest buffers))
+      (delete-other-windows)
+      (let ((columns (agent-shell-dashboard--split-n
+                      (selected-window) ncols 'right)))
+        (cl-loop for col in columns
+                 for count in dist
+                 do (dolist (row (agent-shell-dashboard--split-n col count 'below))
+                      (when rest
+                        (set-window-buffer row (pop rest)))))
+        (balance-windows)
+        (select-window (car columns))))
+    (message "Showing %d marked session%s" n (if (= n 1) "" "s"))))
+
 (defun agent-shell-dashboard ()
   "Open the agent-shell dashboard, taking over the current frame.
 The pre-existing window layout is restored when you press `q'.
 Keys: RET visit, o open-in-other-window, n/p navigate, f fork,
 k kill, s send prompt, N new session, M new session (pick repo),
+SPC mark, u unmark, U unmark all, w show marked layout,
 g refresh, q quit and restore."
   (interactive)
   (let ((buf (get-buffer-create agent-shell-dashboard-buffer-name))

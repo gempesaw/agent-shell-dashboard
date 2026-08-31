@@ -263,7 +263,13 @@ Each cell is a plist with :string and :row keys."
                      (plist-get row :summary)))))
          (preview (agent-shell-dashboard--collapse-whitespace
                    (plist-get row :last-prompt-text)))
-         (line1 (format "  %s  %-7s  %s"
+         ;; The mark rides in the leading gutter rather than in front of
+         ;; the summary, so marking a row never reflows its text.
+         (mark (if (agent-shell-dashboard-marked-p (plist-get row :session-id))
+                   (propertize "*" 'face '(:foreground "#ffb8d1" :weight bold))
+                 " "))
+         (line1 (format "%s %s  %-7s  %s"
+                        mark
                         glyph
                         (propertize activity 'face 'shadow)
                         summary))

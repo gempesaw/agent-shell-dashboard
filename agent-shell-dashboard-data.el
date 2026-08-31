@@ -77,6 +77,14 @@ its id from the set."
   :type 'file
   :group 'agent-shell-dashboard)
 
+(defcustom agent-shell-dashboard-marks-file
+  (expand-file-name "agent-shell-dashboard-marks.el" user-emacs-directory)
+  "Session ids marked for the dashboard's window layout.
+Marks persist across refreshes and restarts so a layout can be
+assembled once and returned to later."
+  :type 'file
+  :group 'agent-shell-dashboard)
+
 (defcustom agent-shell-dashboard-identifier-to-config-fn-alist
   '((claude-code . agent-shell-anthropic-make-claude-code-config))
   "Map an agent's `:identifier' symbol to its config-builder function.
@@ -296,6 +304,69 @@ Returns the new buffer, or nil if it could not be located."
         (insert ";; Session ids forgotten via the dashboard's kill command.\n")
         (prin1 ids (current-buffer))
         (insert "\n")))))
+
+;;; Marked sessions
+;;
+;; Marks are the persistent half of the layout feature: the user marks a
+;; handful of sessions, wanders off through other sessions and the
+;; dashboard, and comes back expecting the same set.  So they are keyed
+;; by session id (not buffer), survive refreshes for free, and are
+;; written to disk on every change.  Mark order is preserved because it
+;; determines placement in the layout.
+
+(defvar agent-shell-dashboard--marked-ids nil
+  "Session ids marked for the window layout, in the order marked.")
+
+(defvar agent-shell-dashboard--marks-loaded nil
+  "Non-nil once marks have been read from disk this Emacs session.")
+
+(defun agent-shell-dashboard--read-marks ()
+  "Read `agent-shell-dashboard-marks-file' or return nil."
+  (when (and agent-shell-dashboard-marks-file
+             (file-exists-p agent-shell-dashboard-marks-file))
+    (with-temp-buffer
+      (insert-file-contents agent-shell-dashboard-marks-file)
+      (goto-char (point-min))
+      (condition-case nil (read (current-buffer)) (error nil)))))
+
+(defun agent-shell-dashboard--write-marks (ids)
+  "Overwrite `agent-shell-dashboard-marks-file' with IDS."
+  (when agent-shell-dashboard-marks-file
+    (with-temp-file agent-shell-dashboard-marks-file
+      (let ((print-length nil)
+            (print-level nil))
+        (insert ";; -*- mode: lisp-data; -*-\n")
+        (insert ";; Session ids marked for the dashboard window layout.\n")
+        (prin1 ids (current-buffer))
+        (insert "\n")))))
+
+(defun agent-shell-dashboard--ensure-marks ()
+  "Load marks from disk once, then return them."
+  (unless agent-shell-dashboard--marks-loaded
+    (setq agent-shell-dashboard--marked-ids (agent-shell-dashboard--read-marks)
+          agent-shell-dashboard--marks-loaded t))
+  agent-shell-dashboard--marked-ids)
+
+(defun agent-shell-dashboard-marked-p (session-id)
+  "Non-nil when SESSION-ID is marked."
+  (and session-id
+       (member session-id (agent-shell-dashboard--ensure-marks))
+       t))
+
+(defun agent-shell-dashboard--set-marks (ids)
+  "Set the marked session IDS and persist them."
+  (setq agent-shell-dashboard--marked-ids ids
+        agent-shell-dashboard--marks-loaded t)
+  (agent-shell-dashboard--write-marks ids))
+
+(defun agent-shell-dashboard--toggle-mark (session-id)
+  "Toggle SESSION-ID's mark, appending so mark order is kept.
+Returns non-nil when the session ended up marked."
+  (let ((marks (agent-shell-dashboard--ensure-marks)))
+    (if (member session-id marks)
+        (progn (agent-shell-dashboard--set-marks (remove session-id marks)) nil)
+      (agent-shell-dashboard--set-marks (append marks (list session-id)))
+      t)))
 
 (defun agent-shell-dashboard--tombstone-session (session-id)
   "Add SESSION-ID to the forgotten-ids file, idempotent."
