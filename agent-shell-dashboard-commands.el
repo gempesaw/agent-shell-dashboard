@@ -29,7 +29,10 @@
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
     (define-key map (kbd "k")   #'agent-shell-dashboard-stop)
     (define-key map (kbd "K")   #'agent-shell-dashboard-forget)
-    (define-key map (kbd "m")   #'agent-shell-dashboard-mark-as-read)
+    ;; `m' marks for the layout.  `mark-as-read' keeps its command but
+    ;; loses the key: it mattered when any unread row tinted gold, and
+    ;; the awaiting tint is recency-gated now.
+    (define-key map (kbd "m")   #'agent-shell-dashboard-toggle-mark)
     (define-key map (kbd "s")   #'agent-shell-dashboard-send)
     (define-key map (kbd "N")   #'agent-shell-dashboard-start-new-session)
     (define-key map (kbd "M")   #'agent-shell-dashboard-start-new-session-pick-repo)
@@ -268,6 +271,11 @@ No-op on a closed row — use `K' to forget those permanently."
         (dolist (w windows)
           (when (window-live-p w)
             (ignore-errors (delete-window w)))))
+      ;; Closing a session takes it out of the layout.  Pruned here on
+      ;; the explicit close rather than from `kill-buffer-hook', which
+      ;; would also fire for sessions whose buffers simply have not been
+      ;; restored yet and quietly empty the mark set.
+      (agent-shell-dashboard--unmark session-id)
       (agent-shell-dashboard-refresh)
       (agent-shell-dashboard--goto-row-by-id neighbor-id))))
 
@@ -299,6 +307,7 @@ to the tombstone so JSONL enumeration won't resurface the row."
             (when (window-live-p w)
               (ignore-errors (delete-window w))))))
       (agent-shell-dashboard--forget-session session-id)
+      (agent-shell-dashboard--unmark session-id)
       (agent-shell-dashboard-refresh)
       (agent-shell-dashboard--goto-row-by-id neighbor-id))))
 
@@ -411,7 +420,7 @@ get their own column; beyond that, columns start stacking rows."
 The pre-existing window layout is restored when you press `q'.
 Keys: RET visit, o open-in-other-window, n/p navigate, f fork,
 k kill, s send prompt, N new session, M new session (pick repo),
-SPC mark, u unmark, U unmark all, w show marked layout,
+SPC/m mark, u unmark, U unmark all, w show marked layout,
 g refresh, q quit and restore."
   (interactive)
   (let ((buf (get-buffer-create agent-shell-dashboard-buffer-name))

@@ -359,6 +359,13 @@ Returns the new buffer, or nil if it could not be located."
         agent-shell-dashboard--marks-loaded t)
   (agent-shell-dashboard--write-marks ids))
 
+(defun agent-shell-dashboard--unmark (session-id)
+  "Drop SESSION-ID's mark if it has one.  Returns non-nil if it did."
+  (when (agent-shell-dashboard-marked-p session-id)
+    (agent-shell-dashboard--set-marks
+     (remove session-id agent-shell-dashboard--marked-ids))
+    t))
+
 (defun agent-shell-dashboard--toggle-mark (session-id)
   "Toggle SESSION-ID's mark, appending so mark order is kept.
 Returns non-nil when the session ended up marked."
