@@ -361,7 +361,11 @@ within each column instead of adding more columns."
   (message "Cleared all marks"))
 
 (defun agent-shell-dashboard--marked-buffers ()
-  "Live buffers for the marked sessions, in mark order.
+  "Live buffers for the marked sessions, sorted by buffer name.
+Sorted rather than kept in mark order so a given set of sessions always
+lands in the same windows: unmarking and re-marking one should not
+shuffle the others out from under muscle memory.
+
 Marked sessions whose buffer is gone are skipped rather than resumed;
 resuming would start processes as a side effect of arranging windows."
   (let (buffers missing)
@@ -372,7 +376,62 @@ resuming would start processes as a side effect of arranging windows."
     (when missing
       (message "%d marked session(s) have no live buffer; skipped"
                (length missing)))
-    (nreverse buffers)))
+    (sort buffers (lambda (a b) (string< (buffer-name a) (buffer-name b))))))
+
+;; Telling four session windows apart by their scrollback means reading
+;; a lot of text.  Each session already has a captured summary, so the
+;; layout puts it in that window's header line, larger and bold — the
+;; same glance-and-recognize trick as the dashboard's jump labels, but
+;; persistent rather than transient.
+
+(defcustom agent-shell-dashboard-layout-label t
+  "Whether the marked-session layout labels each window with its summary."
+  :type 'boolean
+  :group 'agent-shell-dashboard)
+
+(defcustom agent-shell-dashboard-layout-label-height 1.4
+  "Text scale of the layout's per-window summary label."
+  :type 'number
+  :group 'agent-shell-dashboard)
+
+(defvar-local agent-shell-dashboard--saved-header-line 'unset
+  "This buffer's `header-line-format' before the layout replaced it.")
+
+(defun agent-shell-dashboard--layout-label-text (buf)
+  "One-line label for BUF: its summary, else its buffer name."
+  (with-current-buffer buf
+    (let ((summary (agent-shell-dashboard--collapse-whitespace
+                    (agent-shell-dashboard--clean-summary
+                     agent-shell-dashboard--buffer-summary))))
+      (if (s-blank? summary) (buffer-name) summary))))
+
+(defun agent-shell-dashboard--apply-layout-label (buf)
+  "Put BUF's summary in its header line, remembering what was there."
+  (when agent-shell-dashboard-layout-label
+    (with-current-buffer buf
+      (when (eq agent-shell-dashboard--saved-header-line 'unset)
+        (setq agent-shell-dashboard--saved-header-line header-line-format))
+      (setq header-line-format
+            (propertize
+             (concat " " (agent-shell-dashboard--layout-label-text buf))
+             'face `(:height ,agent-shell-dashboard-layout-label-height
+                     :weight bold
+                     :foreground "#ffb8d1"))))))
+
+(defun agent-shell-dashboard--clear-layout-label (buf)
+  "Restore BUF's header line if the layout replaced it."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (unless (eq agent-shell-dashboard--saved-header-line 'unset)
+        (setq header-line-format agent-shell-dashboard--saved-header-line)
+        (setq agent-shell-dashboard--saved-header-line 'unset)))))
+
+(defun agent-shell-dashboard-clear-layout-labels ()
+  "Drop the layout's summary labels from every session buffer."
+  (interactive)
+  (dolist (buf (agent-shell-dashboard--all-buffers))
+    (agent-shell-dashboard--clear-layout-label buf))
+  (message "Cleared layout labels"))
 
 (defun agent-shell-dashboard--layout-distribution (n ncols)
   "Split N windows across NCOLS columns, leftmost columns taking extras.
@@ -403,6 +462,10 @@ get their own column; beyond that, columns start stacking rows."
     (let* ((ncols (min agent-shell-dashboard-layout-max-columns n))
            (dist (agent-shell-dashboard--layout-distribution n ncols))
            (rest buffers))
+      ;; Labels are cleared wholesale first so a session dropped from the
+      ;; marks does not keep wearing one.
+      (dolist (buf (agent-shell-dashboard--all-buffers))
+        (agent-shell-dashboard--clear-layout-label buf))
       (delete-other-windows)
       (let ((columns (agent-shell-dashboard--split-n
                       (selected-window) ncols 'right)))
@@ -410,7 +473,9 @@ get their own column; beyond that, columns start stacking rows."
                  for count in dist
                  do (dolist (row (agent-shell-dashboard--split-n col count 'below))
                       (when rest
-                        (set-window-buffer row (pop rest)))))
+                        (let ((buf (pop rest)))
+                          (agent-shell-dashboard--apply-layout-label buf)
+                          (set-window-buffer row buf)))))
         (balance-windows)
         (select-window (car columns))))
     (message "Showing %d marked session%s" n (if (= n 1) "" "s"))))
