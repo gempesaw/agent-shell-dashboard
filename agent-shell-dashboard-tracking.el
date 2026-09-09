@@ -234,7 +234,7 @@ the backfill finds no summary turn and stops."
   (apply orig-fun request args))
 
 (defun agent-shell-dashboard--safe-clean-up (orig-fun &rest args)
-  "Advice around `agent-shell--clean-up' to prevent errors from blocking buffer kill.
+  "Advice around `agent-shell--clean-up', so it cannot block a buffer kill.
 The upstream clean-up can fail with \"Cannot modify map in-place\" or
 \"Text is read-only\", which prevents killing agent-shell buffers."
   (let ((inhibit-read-only t))
@@ -250,7 +250,8 @@ EXCLUDE-BUFFER is omitted from the result if non-nil."
           (agent-shell-dashboard--all-buffers)))
 
 (defun agent-shell-dashboard-save-active-sessions (&optional exclude-buffer)
-  "Write active agent-shell session metadata to `agent-shell-dashboard-active-sessions-file'.
+  "Write active agent-shell session metadata out for later restore.
+The destination is `agent-shell-dashboard-active-sessions-file'.
 EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
   (interactive)
   (let ((sessions (agent-shell-dashboard--collect-active-sessions exclude-buffer)))
@@ -332,7 +333,8 @@ ACP-SESSION is the alist describing the session being labelled."
     (funcall orig-fun column)))
 
 (defun agent-shell-dashboard-restore-active-sessions ()
-  "Restore agent-shell sessions saved in `agent-shell-dashboard-active-sessions-file'.
+  "Reopen the sessions recorded by `agent-shell-dashboard-save-active-sessions'.
+They are read back from `agent-shell-dashboard-active-sessions-file'.
 Each session is reopened via ACP session resume/load, replaying
 its conversation history.  Skips sessions already open and ones
 whose cwd no longer exists."
