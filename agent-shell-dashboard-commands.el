@@ -121,11 +121,41 @@ to prior history."
                         return pos)))
     (when prev (goto-char prev))))
 
+(defcustom agent-shell-dashboard-search-preview-limit 160
+  "Characters of a row's last-prompt text made searchable.
+Last prompts are unbounded — a pasted log or a long request can run to
+thousands of characters — and every one of those characters is another
+one each keystroke has to match against."
+  :type 'integer
+  :group 'agent-shell-dashboard)
+
+(defun agent-shell-dashboard--read-literally (prompt collection)
+  "Read from COLLECTION with predictable, non-fuzzy matching.
+The ambient `completion-styles' typically ends in `flex', which matches
+scattered characters: with candidates this long it matches nearly
+everything, so a query with no real match returns noise ranked
+alongside genuine hits.  Restrict matching to literal substrings —
+space-separated terms still match in any order via orderless, each one
+having to actually appear."
+  (let ((completion-styles (if (featurep 'orderless)
+                               '(orderless basic)
+                             '(substring basic)))
+        (completion-category-defaults nil)
+        (completion-category-overrides nil))
+    (if (featurep 'orderless)
+        (let ((orderless-matching-styles '(orderless-literal)))
+          (completing-read prompt collection nil t))
+      (completing-read prompt collection nil t))))
+
 (defun agent-shell-dashboard-search ()
   "Jump to a row by searching project / summary / preview text.
 Searches the full row data, not just what fits in the displayed
 column.  Tags captured by `agent-shell-dashboard-setup' show up
-here even when truncated off-screen."
+here even when truncated off-screen.
+
+Matching is literal substring, not fuzzy, and each candidate is
+collapsed onto one line and capped, so typing stays responsive and a
+query either appears in a row or does not match it."
   (interactive)
   (unless (eq major-mode 'agent-shell-dashboard-mode)
     (user-error "Not in agent-shell-dashboard-mode"))
@@ -138,14 +168,18 @@ here even when truncated off-screen."
                   (project (or (and cwd (file-name-nondirectory
                                          (directory-file-name cwd)))
                                ""))
-                  (summary (or (plist-get row :summary) ""))
-                  (preview (or (plist-get row :last-prompt-text) ""))
+                  (summary (agent-shell-dashboard--collapse-whitespace
+                            (plist-get row :summary)))
+                  (preview (truncate-string-to-width
+                            (agent-shell-dashboard--collapse-whitespace
+                             (plist-get row :last-prompt-text))
+                            agent-shell-dashboard-search-preview-limit))
                   (label (s-trim (format "%s | %s | %s"
                                          project summary preview))))
              (cons label it))
            agent-shell-dashboard--row-positions))
-         (choice (completing-read "Jump to row: "
-                                  (-map #'car candidates) nil t))
+         (choice (agent-shell-dashboard--read-literally
+                  "Jump to row: " (-map #'car candidates)))
          (pos (cdr (assoc choice candidates))))
     (when pos (goto-char pos))))
 
