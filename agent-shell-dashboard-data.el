@@ -341,16 +341,46 @@ Returns the new buffer, or nil if it could not be located."
         (insert "\n")))))
 
 (defun agent-shell-dashboard--ensure-marks ()
-  "Load marks from disk once, then return them."
+  "Load marks from disk once, then return them.
+Marks were once bare session-id strings; those are read forward into
+session-only entries, which still resolve, just without fork precision."
   (unless agent-shell-dashboard--marks-loaded
-    (setq agent-shell-dashboard--marked-ids (agent-shell-dashboard--read-marks)
+    (setq agent-shell-dashboard--marked-ids
+          (--map (if (stringp it) (list :buffer nil :session it) it)
+                 (agent-shell-dashboard--read-marks))
           agent-shell-dashboard--marks-loaded t))
   agent-shell-dashboard--marked-ids)
 
-(defun agent-shell-dashboard-marked-p (session-id)
-  "Non-nil when SESSION-ID is marked."
-  (and session-id
-       (member session-id (agent-shell-dashboard--ensure-marks))
+;; Marks identify a buffer first and a session second.  Forking reuses
+;; the session id, so several live buffers can share one — keying marks
+;; by id alone meant marking any fork marked all of them and the layout
+;; then resolved that one id to a single window.  The buffer name is the
+;; only per-fork identity available, but it does not survive a restart,
+;; so each entry carries both: exact while the buffer lives, degrading
+;; to session identity once it is gone.
+
+(defun agent-shell-dashboard--mark-entry (row)
+  "Build a mark entry identifying ROW."
+  (let ((buf (plist-get row :buffer)))
+    (list :buffer (and (buffer-live-p buf) (buffer-name buf))
+          :session (plist-get row :session-id))))
+
+(defun agent-shell-dashboard--mark-matches-p (entry row)
+  "Non-nil when mark ENTRY refers to ROW."
+  (let* ((buf (plist-get row :buffer))
+         (row-name (and (buffer-live-p buf) (buffer-name buf)))
+         (entry-name (plist-get entry :buffer)))
+    (if (and row-name entry-name (get-buffer entry-name))
+        ;; Both sides name a live buffer: forks must not collide.
+        (equal row-name entry-name)
+      (let ((sid (plist-get row :session-id)))
+        (and sid (equal sid (plist-get entry :session)))))))
+
+(defun agent-shell-dashboard-row-marked-p (row)
+  "Non-nil when ROW is marked."
+  (and row
+       (--any? (agent-shell-dashboard--mark-matches-p it row)
+               (agent-shell-dashboard--ensure-marks))
        t))
 
 (defun agent-shell-dashboard--set-marks (ids)
@@ -359,20 +389,25 @@ Returns the new buffer, or nil if it could not be located."
         agent-shell-dashboard--marks-loaded t)
   (agent-shell-dashboard--write-marks ids))
 
-(defun agent-shell-dashboard--unmark (session-id)
-  "Drop SESSION-ID's mark if it has one.  Returns non-nil if it did."
-  (when (agent-shell-dashboard-marked-p session-id)
-    (agent-shell-dashboard--set-marks
-     (remove session-id agent-shell-dashboard--marked-ids))
-    t))
-
-(defun agent-shell-dashboard--toggle-mark (session-id)
-  "Toggle SESSION-ID's mark, appending so mark order is kept.
-Returns non-nil when the session ended up marked."
+(defun agent-shell-dashboard--unmark (row)
+  "Drop ROW's mark if it has one.  Returns non-nil if it did."
   (let ((marks (agent-shell-dashboard--ensure-marks)))
-    (if (member session-id marks)
-        (progn (agent-shell-dashboard--set-marks (remove session-id marks)) nil)
-      (agent-shell-dashboard--set-marks (append marks (list session-id)))
+    (when (agent-shell-dashboard-row-marked-p row)
+      (agent-shell-dashboard--set-marks
+       (--remove (agent-shell-dashboard--mark-matches-p it row) marks))
+      t)))
+
+(defun agent-shell-dashboard--toggle-mark (row)
+  "Toggle ROW's mark, appending so mark order is kept.
+Returns non-nil when the row ended up marked."
+  (let ((marks (agent-shell-dashboard--ensure-marks)))
+    (if (agent-shell-dashboard-row-marked-p row)
+        (progn
+          (agent-shell-dashboard--set-marks
+           (--remove (agent-shell-dashboard--mark-matches-p it row) marks))
+          nil)
+      (agent-shell-dashboard--set-marks
+       (append marks (list (agent-shell-dashboard--mark-entry row))))
       t)))
 
 (defun agent-shell-dashboard--tombstone-session (session-id)

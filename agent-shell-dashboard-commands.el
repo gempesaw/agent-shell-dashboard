@@ -300,16 +300,18 @@ No-op on a closed row — use `K' to forget those permanently."
     (unless (and buf (buffer-live-p buf))
       (user-error "Row is not live; use K to forget closed sessions"))
     (when (yes-or-no-p (format "Stop %s? " (buffer-name buf)))
+      ;; Closing a session takes it out of the layout.  Pruned here on
+      ;; the explicit close rather than from `kill-buffer-hook', which
+      ;; would also fire for sessions whose buffers simply have not been
+      ;; restored yet and quietly empty the mark set.  Must run before
+      ;; the kill: once the buffer is gone the mark can only be matched
+      ;; by session id, which would take this fork's siblings with it.
+      (agent-shell-dashboard--unmark row)
       (let ((windows (get-buffer-window-list buf nil nil)))
         (kill-buffer buf)
         (dolist (w windows)
           (when (window-live-p w)
             (ignore-errors (delete-window w)))))
-      ;; Closing a session takes it out of the layout.  Pruned here on
-      ;; the explicit close rather than from `kill-buffer-hook', which
-      ;; would also fire for sessions whose buffers simply have not been
-      ;; restored yet and quietly empty the mark set.
-      (agent-shell-dashboard--unmark session-id)
       (agent-shell-dashboard-refresh)
       (agent-shell-dashboard--goto-row-by-id neighbor-id))))
 
@@ -334,6 +336,9 @@ to the tombstone so JSONL enumeration won't resurface the row."
                        "Forget \"%s\" permanently (also kills its live buffer)? "
                      "Forget \"%s\" permanently? ")
                    label))
+      ;; Before the kill, so the mark is matched by buffer and this
+      ;; fork's siblings keep theirs.
+      (agent-shell-dashboard--unmark row)
       (when (and buf (buffer-live-p buf))
         (let ((windows (get-buffer-window-list buf nil nil)))
           (kill-buffer buf)
@@ -341,7 +346,6 @@ to the tombstone so JSONL enumeration won't resurface the row."
             (when (window-live-p w)
               (ignore-errors (delete-window w))))))
       (agent-shell-dashboard--forget-session session-id)
-      (agent-shell-dashboard--unmark session-id)
       (agent-shell-dashboard-refresh)
       (agent-shell-dashboard--goto-row-by-id neighbor-id))))
 
@@ -368,7 +372,7 @@ within each column instead of adding more columns."
   (let* ((row (agent-shell-dashboard--row-at-point))
          (sid (or (plist-get row :session-id)
                   (user-error "Row has no session id")))
-         (marked (agent-shell-dashboard--toggle-mark sid)))
+         (marked (agent-shell-dashboard--toggle-mark row)))
     (agent-shell-dashboard-refresh)
     (agent-shell-dashboard--goto-row-by-id sid)
     (agent-shell-dashboard-next)
@@ -381,9 +385,7 @@ within each column instead of adding more columns."
   (interactive)
   (let* ((row (agent-shell-dashboard--row-at-point))
          (sid (plist-get row :session-id)))
-    (when (agent-shell-dashboard-marked-p sid)
-      (agent-shell-dashboard--set-marks
-       (remove sid agent-shell-dashboard--marked-ids)))
+    (agent-shell-dashboard--unmark row)
     (agent-shell-dashboard-refresh)
     (agent-shell-dashboard--goto-row-by-id sid)))
 
@@ -403,10 +405,18 @@ shuffle the others out from under muscle memory.
 Marked sessions whose buffer is gone are skipped rather than resumed;
 resuming would start processes as a side effect of arranging windows."
   (let (buffers missing)
-    (dolist (sid (agent-shell-dashboard--ensure-marks))
-      (if-let* ((buf (agent-shell-dashboard--find-live-buffer-for-session sid)))
-          (push buf buffers)
-        (push sid missing)))
+    (dolist (entry (agent-shell-dashboard--ensure-marks))
+      (let* ((name (plist-get entry :buffer))
+             (sid (plist-get entry :session))
+             (buf (or (and name (get-buffer name))
+                      (and sid (agent-shell-dashboard--find-live-buffer-for-session
+                                sid)))))
+        (if (buffer-live-p buf)
+            ;; Two entries can resolve to the same buffer — a fork whose
+            ;; sibling died falls back to session identity and lands on
+            ;; whatever buffer that id still resolves to.  One window each.
+            (cl-pushnew buf buffers)
+          (push entry missing))))
     (when missing
       (message "%d marked session(s) have no live buffer; skipped"
                (length missing)))
