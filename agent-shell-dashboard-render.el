@@ -584,12 +584,17 @@ them.  When even that span is taller than the window, fall back to
 collapsing the gaps."
   (let* ((inhibit-read-only t)
          (label-lines (agent-shell-dashboard--jump-label-lines labeled))
-         (first (car label-lines))
          (last (car (last label-lines)))
+         ;; Carried through verbatim, and the walk starts at line 1 rather
+         ;; than at the first label: dropping the dashboard's own header
+         ;; row shifts every column up by it.
+         (banner (save-excursion
+                   (goto-char (point-min))
+                   (buffer-substring (line-beginning-position)
+                                     (line-end-position))))
          ;; The last letter absorbs rows past the span it was measured
          ;; over, so leave its height as headroom before claiming a fit.
-         (positional (and first
-                          (<= (+ 5 (- last first)) (window-body-height))))
+         (positional (and last (<= (+ 5 last) (window-body-height))))
          (label-height (if positional
                            5.0
                          (agent-shell-dashboard--jump-label-height labeled)))
@@ -621,11 +626,14 @@ collapsing the gaps."
                                        :weight bold
                                        :height ,label-height))
                    label-height)))))
+    (unless (ht-contains? lines 1)
+      (ht-set! lines 1 banner))
     (erase-buffer)
     (when label-lines
       (if positional
-          (agent-shell-dashboard--insert-jump-positional lines heights first last)
-        (agent-shell-dashboard--insert-jump-collapsed lines label-lines)))
+          (agent-shell-dashboard--insert-jump-positional lines heights 1 last)
+        (agent-shell-dashboard--insert-jump-collapsed
+         lines (-sort #'< (ht-keys lines)))))
     (goto-char (point-min))
     (when-let ((window (get-buffer-window (current-buffer))))
       (set-window-start window (point-min)))))
