@@ -512,11 +512,37 @@ exist than fit horizontally, extra projects wrap to a second band."
        (+ agent-shell-dashboard-column-width
           agent-shell-dashboard-column-gap))))
 
+(defun agent-shell-dashboard--jump-label-height (labeled)
+  "Scale for LABELED's letters, shrunk when they would not all fit.
+Each letter costs roughly its own height in screen lines, so enough
+bands of projects can overflow the window even after blank runs are
+collapsed.  Trading size for visibility beats rendering a letter
+somewhere the user cannot see it."
+  (let* ((distinct (lambda (key)
+                     (->> labeled
+                          (--keep (plist-get (cdr it) key))
+                          (-map #'line-number-at-pos)
+                          (-distinct)
+                          (length))))
+         ;; Columns sharing a band share a line, so cost follows distinct
+         ;; lines; counting columns would shrink the letters long before
+         ;; they actually stopped fitting.
+         (rows (funcall distinct :first-row-pos))
+         (headers (funcall distinct :header-pos))
+         (budget (- (window-body-height) (* headers 1.5) 4)))
+    (if (or (zerop rows) (<= budget 0))
+        5.0
+      (max 1.5 (min 5.0 (/ budget (float rows)))))))
+
 (defun agent-shell-dashboard--render-jump-view (labeled)
   "Erase buffer and render only project headers with giant labels.
-Letters are placed at the same horizontal column as the dashboard
-showed each project, so the eye lands in the right place."
+Letters keep the horizontal column the dashboard showed each project
+at, so the eye lands in the right place.  Vertical runs of blank lines
+are collapsed rather than reproduced: the dashboard is as tall as the
+window on its own, and the enlarged letters push it past that, which
+scrolled the first band of projects off the top entirely."
   (let* ((inhibit-read-only t)
+         (label-height (agent-shell-dashboard--jump-label-height labeled))
          (lines (ht-create)))
     ;; Collect (line-num . line-string) per relevant line, before erasing.
     (dolist (pair labeled)
@@ -543,19 +569,24 @@ showed each project, so the eye lands in the right place."
                      (agent-shell-dashboard--place-at-col
                       existing col
                       (propertize (format " %c " ch)
-                                  'face '(:foreground "black"
+                                  'face `(:foreground "black"
                                           :background "yellow"
                                           :weight bold
-                                          :height 5.0))))))))
+                                          :height ,label-height))))))))
     (erase-buffer)
     ;; Take over the dashboard's natural lines 1-2 (its own header +
     ;; blank) so the project-header line stays at the same buffer line
     ;; as in normal view — otherwise we'd inject extra blank lines.
     (insert (propertize "Pick a column:" 'face 'shadow) "\n\n")
-    (let* ((line-keys (sort (ht-keys lines) #'<))
-           (max-line (or (car (last line-keys)) 0)))
-      (cl-loop for i from 3 to max-line do
-               (insert (ht-get lines i "") "\n")))))
+    (let ((previous nil))
+      (dolist (line (sort (ht-keys lines) #'<))
+        (when (and previous (> line (1+ previous)))
+          (insert "\n"))
+        (insert (ht-get lines line "") "\n")
+        (setq previous line)))
+    (goto-char (point-min))
+    (when-let ((window (get-buffer-window (current-buffer))))
+      (set-window-start window (point-min)))))
 
 (defun agent-shell-dashboard--place-at-col (existing col str)
   "Return EXISTING line with STR placed starting at column COL.
