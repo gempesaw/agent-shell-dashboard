@@ -512,21 +512,28 @@ exist than fit horizontally, extra projects wrap to a second band."
        (+ agent-shell-dashboard-column-width
           agent-shell-dashboard-column-gap))))
 
+(defun agent-shell-dashboard--jump-label-lines (labeled)
+  "Dashboard line numbers LABELED puts something on, sorted."
+  (->> labeled
+       (--mapcat (list (plist-get (cdr it) :header-pos)
+                       (plist-get (cdr it) :first-row-pos)))
+       (-non-nil)
+       (-map #'line-number-at-pos)
+       (-distinct)
+       (-sort #'<)))
+
 (defun agent-shell-dashboard--jump-label-height (labeled)
   "Scale for LABELED's letters, shrunk when they would not all fit.
-Each letter costs roughly its own height in screen lines, so enough
-bands of projects can overflow the window even after blank runs are
-collapsed.  Trading size for visibility beats rendering a letter
-somewhere the user cannot see it."
+Each letter costs roughly its own height in screen rows, so enough
+bands of projects overflow the window even once the gaps are collapsed.
+Budgets by distinct label lines rather than by column, since every
+column in a band shares one line."
   (let* ((distinct (lambda (key)
                      (->> labeled
                           (--keep (plist-get (cdr it) key))
                           (-map #'line-number-at-pos)
                           (-distinct)
                           (length))))
-         ;; Columns sharing a band share a line, so cost follows distinct
-         ;; lines; counting columns would shrink the letters long before
-         ;; they actually stopped fitting.
          (rows (funcall distinct :first-row-pos))
          (headers (funcall distinct :header-pos))
          (budget (- (window-body-height) (* headers 1.5) 4)))
@@ -534,56 +541,91 @@ somewhere the user cannot see it."
         5.0
       (max 1.5 (min 5.0 (/ budget (float rows)))))))
 
+(defun agent-shell-dashboard--insert-jump-positional (lines heights first last)
+  "Insert LINES FIRST..LAST, each tall row absorbing the blanks beneath it.
+A letter drawn at five times the normal height occupies five screen
+rows, so it is emitted in place of the five dashboard rows it covers
+rather than on top of them.  Everything below therefore keeps the row
+it had, which is the whole point of the view: the eye goes where the
+column already was."
+  (let ((row first))
+    (while (<= row last)
+      (insert (ht-get lines row "") "\n")
+      (let* ((span (max 1 (ceiling (ht-get heights row 1))))
+             (limit (+ row span)))
+        ;; Never let a tall row swallow one that carries its own label.
+        (setq row (or (cl-loop for probe from (1+ row) below limit
+                               when (ht-contains? lines probe) return probe)
+                      limit))))))
+
+(defun agent-shell-dashboard--insert-jump-collapsed (lines keys)
+  "Insert the KEYS of LINES, collapsing blank runs to one separator.
+Loses the dashboard's vertical spacing, so it is the fallback for
+layouts too tall to reproduce — a label in roughly the right place
+beats one scrolled off the screen."
+  (let ((previous nil))
+    (dolist (line keys)
+      (when (and previous (> line (1+ previous)))
+        (insert "\n"))
+      (insert (ht-get lines line "") "\n")
+      (setq previous line))))
+
 (defun agent-shell-dashboard--render-jump-view (labeled)
   "Erase buffer and render only project headers with giant labels.
-Letters keep the horizontal column the dashboard showed each project
-at, so the eye lands in the right place.  Vertical runs of blank lines
-are collapsed rather than reproduced: the dashboard is as tall as the
-window on its own, and the enlarged letters push it past that, which
-scrolled the first band of projects off the top entirely."
+Letters keep the column and, where it fits, the row the dashboard
+showed each project at, so the eye lands where it already was.
+
+Reproducing the dashboard line for line is what broke this before: that
+buffer runs to hundreds of lines against a window of tens, so the view
+scrolled and the first band of projects sat above the top edge.  Only
+the span actually carrying labels is reproduced, and the enlarged
+letters stand in for the blank rows they cover instead of displacing
+them.  When even that span is taller than the window, fall back to
+collapsing the gaps."
   (let* ((inhibit-read-only t)
-         (label-height (agent-shell-dashboard--jump-label-height labeled))
-         (lines (ht-create)))
-    ;; Collect (line-num . line-string) per relevant line, before erasing.
-    (dolist (pair labeled)
-      (let* ((ch (car pair))
-             (d (cdr pair))
-             (project (plist-get d :project))
-             (h-pos (plist-get d :header-pos))
-             (fr-pos (plist-get d :first-row-pos)))
-        (when h-pos
-          (let* ((line (line-number-at-pos h-pos))
-                 (col (save-excursion (goto-char h-pos) (current-column)))
-                 (existing (ht-get lines line "")))
-            (ht-set! lines line
-                     (agent-shell-dashboard--place-at-col
-                      existing col
-                      (propertize (or project "")
-                                  'face '(:inherit font-lock-function-name-face
-                                          :height 1.5 :weight bold))))))
-        (when fr-pos
-          (let* ((line (line-number-at-pos fr-pos))
-                 (col (save-excursion (goto-char fr-pos) (current-column)))
-                 (existing (ht-get lines line "")))
-            (ht-set! lines line
-                     (agent-shell-dashboard--place-at-col
-                      existing col
-                      (propertize (format " %c " ch)
-                                  'face `(:foreground "black"
-                                          :background "yellow"
-                                          :weight bold
-                                          :height ,label-height))))))))
+         (label-lines (agent-shell-dashboard--jump-label-lines labeled))
+         (first (car label-lines))
+         (last (car (last label-lines)))
+         ;; The last letter absorbs rows past the span it was measured
+         ;; over, so leave its height as headroom before claiming a fit.
+         (positional (and first
+                          (<= (+ 5 (- last first)) (window-body-height))))
+         (label-height (if positional
+                           5.0
+                         (agent-shell-dashboard--jump-label-height labeled)))
+         (lines (ht-create))
+         (heights (ht-create)))
+    (cl-flet ((place (pos str height)
+                (let ((line (line-number-at-pos pos))
+                      (col (save-excursion (goto-char pos) (current-column))))
+                  (ht-set! lines line
+                           (agent-shell-dashboard--place-at-col
+                            (ht-get lines line "") col str))
+                  (ht-set! heights line (max height (ht-get heights line 1))))))
+      (dolist (pair labeled)
+        (let* ((ch (car pair))
+               (d (cdr pair))
+               (h-pos (plist-get d :header-pos))
+               (fr-pos (plist-get d :first-row-pos)))
+          (when h-pos
+            (place h-pos
+                   (propertize (or (plist-get d :project) "")
+                               'face '(:inherit font-lock-function-name-face
+                                       :height 1.5 :weight bold))
+                   1.5))
+          (when fr-pos
+            (place fr-pos
+                   (propertize (format " %c " ch)
+                               'face `(:foreground "black"
+                                       :background "yellow"
+                                       :weight bold
+                                       :height ,label-height))
+                   label-height)))))
     (erase-buffer)
-    ;; Take over the dashboard's natural lines 1-2 (its own header +
-    ;; blank) so the project-header line stays at the same buffer line
-    ;; as in normal view — otherwise we'd inject extra blank lines.
-    (insert (propertize "Pick a column:" 'face 'shadow) "\n\n")
-    (let ((previous nil))
-      (dolist (line (sort (ht-keys lines) #'<))
-        (when (and previous (> line (1+ previous)))
-          (insert "\n"))
-        (insert (ht-get lines line "") "\n")
-        (setq previous line)))
+    (when label-lines
+      (if positional
+          (agent-shell-dashboard--insert-jump-positional lines heights first last)
+        (agent-shell-dashboard--insert-jump-collapsed lines label-lines)))
     (goto-char (point-min))
     (when-let ((window (get-buffer-window (current-buffer))))
       (set-window-start window (point-min)))))
