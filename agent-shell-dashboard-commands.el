@@ -240,18 +240,39 @@ basically a fork-with-the-same-id-and-close-the-stale-one."
         (message "Reloaded session into %s" (buffer-name new-buf))))
     (agent-shell-dashboard-refresh)))
 
+(defun agent-shell-dashboard--fork-capable-p (buffer)
+  "Non-nil when BUFFER's agent can fork its session."
+  (and (buffer-live-p buffer)
+       (map-elt (buffer-local-value 'agent-shell--state buffer)
+                :supports-session-fork)))
+
 (defun agent-shell-dashboard-fork ()
-  "Fork the row's session into a new shell."
+  "Fork the row's session into a shell with its own session id.
+Asks the agent to fork, which copies the conversation into a new
+session with a new id and its own transcript.  Resuming the same id in
+a second shell -- what this used to do -- left both conversations
+writing into one transcript tree, and a later resume walked a single
+branch of it, so whichever half lost the race came back missing.
+
+Falls back to resuming the id for closed rows, which have no live
+session to fork, and for agents without fork support."
   (interactive)
   (let* ((row (agent-shell-dashboard--row-at-point))
-         (data (or (and (plist-get row :buffer)
-                        (agent-shell-dashboard--buffer-session-data
-                         (plist-get row :buffer)))
-                   row))
-         (buf (agent-shell-dashboard--resume-session data)))
-    (when buf
-      (message "Forked into %s" (buffer-name buf)))
-    (agent-shell-dashboard-refresh)))
+         (buffer (plist-get row :buffer)))
+    (if (agent-shell-dashboard--fork-capable-p buffer)
+        (progn
+          (with-current-buffer buffer (agent-shell-fork))
+          ;; The fork is a round trip to the agent, so the new row does
+          ;; not exist yet when this returns.
+          (run-with-idle-timer 1 nil #'agent-shell-dashboard-refresh))
+      (let ((new (agent-shell-dashboard--resume-session
+                  (or (and (buffer-live-p buffer)
+                           (agent-shell-dashboard--buffer-session-data buffer))
+                      row))))
+        (when new
+          (message "Resumed %s; session shares the original's id"
+                   (buffer-name new)))
+        (agent-shell-dashboard-refresh)))))
 
 (defun agent-shell-dashboard-mark-as-read ()
   "Acknowledge the row's awaiting state, clearing the gold tint.
