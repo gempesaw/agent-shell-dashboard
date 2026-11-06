@@ -107,7 +107,7 @@ pending queue behind a busy request and there is nothing to poll."
                       (lambda ()
                         (when (buffer-live-p buf)
                           (with-current-buffer buf
-                            (agent-shell-queue-request agent-shell-dashboard-summary-prompt))))))))
+                            (agent-shell-dashboard--queue-prompt agent-shell-dashboard-summary-prompt))))))))
 
 (defun agent-shell-dashboard--status-line-p (line)
   "Return non-nil if LINE is an agent-shell status message to skip."
@@ -216,22 +216,19 @@ the backfill finds no summary turn and stops."
         (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
                         sid 12)))))
 
-(defun agent-shell-dashboard--after-response-hook (orig-fun &rest args)
-  "Advice to capture summary after any response completes."
-  (prog1 (apply orig-fun args)
-    (when (derived-mode-p 'agent-shell-mode)
-      (agent-shell-dashboard--check-for-summary-capture))))
+(defun agent-shell-dashboard--capture-on-turn-complete (&rest args)
+  "Capture a summary when a turn ends.  Advice on `agent-shell--emit-event'."
+  (when (eq (plist-get args :event) 'turn-complete)
+    (when-let* ((buffer (map-elt (agent-shell--state) :buffer))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (agent-shell-dashboard--check-for-summary-capture)))))
 
-(defun agent-shell-dashboard--track-queue-request (orig-fun request &rest args)
-  "Advice around `agent-shell-queue-request' to record submitted prompts."
-  (when (and (derived-mode-p 'agent-shell-mode)
-             (stringp request)
-             (let ((trimmed (s-trim request)))
-               (and (not (s-blank? trimmed))
-                    (not (s-equals? trimmed agent-shell-dashboard-summary-prompt)))))
-    (setq-local agent-shell-dashboard--buffer-last-prompt-text (s-trim request))
-    (setq-local agent-shell-dashboard--buffer-last-prompt-time (current-time)))
-  (apply orig-fun request args))
+(defun agent-shell-dashboard--queue-prompt (prompt)
+  "Send PROMPT to this buffer's agent, queueing it behind a running turn."
+  (if (shell-maker-busy)
+      (agent-shell--prompt-queue-enqueue :prompt prompt)
+    (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t)))
 
 (defun agent-shell-dashboard--safe-clean-up (orig-fun &rest args)
   "Advice around `agent-shell--clean-up', so it cannot block a buffer kill.
@@ -386,9 +383,9 @@ whose cwd no longer exists."
 
 (defun agent-shell-dashboard-setup ()
   "Install the dashboard's tracking machinery.
-Adds advice on `shell-maker-submit', `agent-shell-queue-request',
-`agent-shell--process-pending-request', `agent-shell--emit-event'
-\(to backfill summaries on any session resume), `agent-shell--clean-up',
+Adds advice on `shell-maker-submit', `agent-shell--emit-event' (to
+capture summaries at turn end and backfill them on resume),
+`agent-shell--clean-up',
 and the three session-picker hooks.  Adds `kill-emacs-hook' and
 `kill-buffer-hook' for active-sessions persistence.
 
@@ -396,8 +393,7 @@ This is the function users should call from their init.el to
 opt into automatic summary capture and active-session tracking."
   (interactive)
   (advice-add 'shell-maker-submit               :around #'agent-shell-dashboard--track-prompt-submission)
-  (advice-add 'agent-shell-queue-request        :around #'agent-shell-dashboard--track-queue-request)
-  (advice-add 'agent-shell--process-pending-request :around #'agent-shell-dashboard--after-response-hook)
+  (advice-add 'agent-shell--emit-event          :after  #'agent-shell-dashboard--capture-on-turn-complete)
   (advice-add 'agent-shell--emit-event          :after  #'agent-shell-dashboard--backfill-on-init-finished)
   (advice-add 'agent-shell--clean-up            :around #'agent-shell-dashboard--safe-clean-up)
   (advice-add 'agent-shell--session-selection-columns :filter-return #'agent-shell-dashboard--session-selection-columns-advice)
@@ -411,8 +407,7 @@ opt into automatic summary capture and active-session tracking."
   "Remove the dashboard's tracking machinery installed by `setup'."
   (interactive)
   (advice-remove 'shell-maker-submit               #'agent-shell-dashboard--track-prompt-submission)
-  (advice-remove 'agent-shell-queue-request        #'agent-shell-dashboard--track-queue-request)
-  (advice-remove 'agent-shell--process-pending-request #'agent-shell-dashboard--after-response-hook)
+  (advice-remove 'agent-shell--emit-event          #'agent-shell-dashboard--capture-on-turn-complete)
   (advice-remove 'agent-shell--emit-event          #'agent-shell-dashboard--backfill-on-init-finished)
   (advice-remove 'agent-shell--clean-up            #'agent-shell-dashboard--safe-clean-up)
   (advice-remove 'agent-shell--session-selection-columns #'agent-shell-dashboard--session-selection-columns-advice)
