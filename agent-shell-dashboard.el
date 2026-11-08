@@ -1,6 +1,6 @@
 ;;; agent-shell-dashboard.el --- Magit-style dashboard for agent-shell sessions -*- lexical-binding: t; -*-
 
-;; Author: Daniel Gempesaw <gempesaw@modular.com>
+;; Author: Daniel Gempesaw <gempesaw@gmail.com>
 ;; URL: https://github.com/gempesaw/agent-shell-dashboard
 ;; Package-Requires: ((emacs "28.1") (agent-shell "0.1.0"))
 ;; Keywords: tools, convenience
