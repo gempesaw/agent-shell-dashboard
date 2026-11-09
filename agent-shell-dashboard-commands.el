@@ -142,10 +142,15 @@ having to actually appear."
                              '(substring basic)))
         (completion-category-defaults nil)
         (completion-category-overrides nil))
-    (if (featurep 'orderless)
-        (let ((orderless-matching-styles '(orderless-literal)))
-          (completing-read prompt collection nil t))
-      (completing-read prompt collection nil t))))
+    (let ((table (lambda (string predicate action)
+                   (if (eq action 'metadata)
+                       '(metadata (display-sort-function . identity)
+                                  (cycle-sort-function . identity))
+                     (complete-with-action action collection string predicate)))))
+      (if (featurep 'orderless)
+          (let ((orderless-matching-styles '(orderless-literal)))
+            (completing-read prompt table nil t))
+        (completing-read prompt table nil t)))))
 
 (defun agent-shell-dashboard-search ()
   "Jump to a row by searching project / summary / preview text.
@@ -178,8 +183,17 @@ query either appears in a row or does not match it."
                                          project summary preview))))
              (cons label it))
            agent-shell-dashboard--row-positions))
+         (newest-first
+          (-sort (lambda (a b)
+                   (let ((ta (agent-shell-dashboard--row-time
+                              (get-text-property (cdr a) 'dg-row)))
+                         (tb (agent-shell-dashboard--row-time
+                              (get-text-property (cdr b) 'dg-row))))
+                     (cond ((and ta tb) (time-less-p tb ta))
+                           (ta t))))
+                 candidates))
          (choice (agent-shell-dashboard--read-literally
-                  "Jump to row: " (-map #'car candidates)))
+                  "Jump to row: " (-map #'car newest-first)))
          (pos (cdr (assoc choice candidates))))
     (when pos (goto-char pos))))
 
