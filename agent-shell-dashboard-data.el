@@ -575,19 +575,23 @@ snapshot, else the archive's last-summary-capture time."
                       :last-prompt-text nil)
                 rows)))
       ;; Backfill missing summaries on rows from earlier sources.
-      (dolist (row rows)
-        (unless (plist-get row :summary)
-          (when-let* ((entry (--find (equal (plist-get it :session-id)
-                                            (plist-get row :session-id))
-                                     archive)))
-            (plist-put row :summary (plist-get entry :summary))))))
+      (let ((archived (ht-create)))
+        (dolist (entry archive)
+          (ht-set! archived (plist-get entry :session-id) (plist-get entry :summary)))
+        (dolist (row rows)
+          (unless (plist-get row :summary)
+            (when-let* ((summary (ht-get archived (plist-get row :session-id))))
+              (plist-put row :summary summary))))))
     (sort rows #'agent-shell-dashboard--row-less-p)))
 
 (defun agent-shell-dashboard--row-time (row)
   "Return the most relevant timestamp for ROW, or nil."
   (or (plist-get row :last-prompt-time)
-      (when-let* ((updated (plist-get row :updated-at)))
-        (ignore-errors (date-to-time updated)))))
+      (plist-get row :parsed-updated-at)
+      (when-let* ((updated (plist-get row :updated-at))
+                  (time (ignore-errors (date-to-time updated))))
+        (plist-put row :parsed-updated-at time)
+        time)))
 
 (defun agent-shell-dashboard--row-less-p (a b)
   "Return non-nil if dashboard row A should sort before B.
