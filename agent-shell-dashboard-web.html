@@ -99,7 +99,7 @@
   </div>
   <div id="queued" class="shadow"></div>
   <div id="compose">
-    <textarea id="prompt" placeholder="Message (⌘/Ctrl+Enter to send)"></textarea>
+    <textarea id="prompt" placeholder="Message (Enter to send, Shift+Enter for a newline)"></textarea>
     <button onclick="send()">send</button>
   </div>
 </div>
@@ -300,7 +300,7 @@ document.addEventListener("click", (e) => {
   else go("c/" + encodeURIComponent(row.dataset.session));
 });
 $("prompt").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 $("search").addEventListener("input", renderDashboard);
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
