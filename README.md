@@ -69,3 +69,13 @@ make clean
 
 The Makefile finds its dependencies in `~/.emacs.d/elpa`, picking the
 most recently installed copy of each.
+
+## Web dashboard
+
+`agent-shell-dashboard-web-start` serves the dashboard on port 6969 to
+the local network and copies its URL. Open that URL once per browser:
+the token in its `#fragment` is stored by the page and required on every
+request, since prompts sent from the page run with the session's
+permissions. `agent-shell-dashboard-web-url` copies the URL again, and
+deleting `agent-shell-dashboard-web-token` under `user-emacs-directory`
+rotates the token on the next start.

@@ -144,6 +144,26 @@ list reverts to the uniform banded layout across all projects."
   (-each agent-shell-dashboard--highlight-overlays #'delete-overlay)
   (setq agent-shell-dashboard--highlight-overlays nil))
 
+(defun agent-shell-dashboard--row-face (row)
+  "Background face for ROW, or nil when it stays untinted.
+Blocking and busy states always win.  `awaiting' only tints while it is
+still fresh: it fires for any idle session with unread history, so on a
+busy dashboard nearly every row qualifies and the tint stops
+discriminating.  Closed rows stay untinted; they already sort last and
+carry a shadowed glyph."
+  (let ((recency (and (plist-get row :buffer)
+                      (agent-shell-dashboard--row-recency row)))
+        (status (plist-get row :status)))
+    (cond
+     ((eq status 'permission) 'agent-shell-dashboard-permission-row-face)
+     ((eq status 'working)    'agent-shell-dashboard-working-row-face)
+     ((and (eq status 'awaiting) (eq recency 'recent))
+      'agent-shell-dashboard-awaiting-row-face)
+     (t (pcase recency
+          ('recent 'agent-shell-dashboard-recent-row-face)
+          ('today  'agent-shell-dashboard-today-row-face)
+          ('older  'agent-shell-dashboard-stale-row-face))))))
+
 (defun agent-shell-dashboard--apply-row-status-overlays ()
   "Tint working / permission rows with a persistent background.
 Cursor's hl-line overlay has higher priority and so wins on the
@@ -155,28 +175,7 @@ row at point."
     (while (< pos max)
       (let* ((next (or (next-single-property-change pos 'dg-row) max))
              (row (get-text-property pos 'dg-row))
-             ;; Blocking and busy states always win.  `awaiting' only
-             ;; tints while it is still fresh: it fires for any idle
-             ;; session with unread history, so on a busy dashboard nearly
-             ;; every row qualifies and the tint stops discriminating —
-             ;; gating it on recency keeps "your turn" meaningful and lets
-             ;; older threads fall through to the recency bands.  Closed
-             ;; rows stay untinted; they already sort last and carry a
-             ;; shadowed glyph.
-             (recency (and row (plist-get row :buffer)
-                           (agent-shell-dashboard--row-recency row)))
-             (status (and row (plist-get row :status)))
-             (face
-              (cond
-               ((null row) nil)
-               ((eq status 'permission) 'agent-shell-dashboard-permission-row-face)
-               ((eq status 'working)    'agent-shell-dashboard-working-row-face)
-               ((and (eq status 'awaiting) (eq recency 'recent))
-                'agent-shell-dashboard-awaiting-row-face)
-               (t (pcase recency
-                    ('recent 'agent-shell-dashboard-recent-row-face)
-                    ('today  'agent-shell-dashboard-today-row-face)
-                    ('older  'agent-shell-dashboard-stale-row-face))))))
+             (face (and row (agent-shell-dashboard--row-face row))))
         (when face
           (let ((ov (make-overlay pos next)))
             (overlay-put ov 'face face)
