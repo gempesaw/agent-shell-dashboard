@@ -216,20 +216,26 @@ to distinguish today's killed sessions from older archived ones."
     (_           (propertize "·" 'face 'shadow))))
 
 (defun agent-shell-dashboard--compute-fork-index (rows)
-  "Return a hash of session-id -> group index for forked live ROWS.
-A session-id counts as forked when two or more of ROWS with that id
-have a live buffer.  Indices are assigned in session-id order so the
-same fork keeps the same color across refreshes."
-  (let ((counts (ht-create)))
+  "Return a hash of session-id -> fork-group index for ROWS.
+Rows group by the session they descend from, so a parent and the
+sessions forked off it share a badge.  A group is badged once it has
+two or more rows and at least one is live."
+  (agent-shell-dashboard--record-fork-lineage)
+  (let ((groups (ht-create)))
     (dolist (row rows)
-      (when (plist-get row :buffer)
-        (let ((id (plist-get row :session-id)))
-          (when id
-            (ht-set! counts id (1+ (ht-get counts id 0)))))))
+      (when-let* ((id (plist-get row :session-id)))
+        (let ((root (agent-shell-dashboard--fork-root id)))
+          (ht-set! groups root (cons row (ht-get groups root))))))
     (let ((idx (ht-create))
-          (fork-ids (sort (--filter (>= (ht-get counts it) 2) (ht-keys counts))
-                          #'string<)))
-      (--each-indexed fork-ids (ht-set! idx it it-index))
+          (roots (sort (--filter (let ((members (ht-get groups it)))
+                                   (and (cdr members)
+                                        (--some (plist-get it :buffer) members)))
+                                 (ht-keys groups))
+                       #'string<)))
+      (--each-indexed roots
+        (let ((i it-index))
+          (dolist (row (ht-get groups it))
+            (ht-set! idx (plist-get row :session-id) i))))
       idx)))
 
 (defun agent-shell-dashboard--fork-badge (index)

@@ -85,6 +85,12 @@ assembled once and returned to later."
   :type 'file
   :group 'agent-shell-dashboard)
 
+(defcustom agent-shell-dashboard-fork-lineage-file
+  (expand-file-name "agent-shell-dashboard-forks.el" user-emacs-directory)
+  "Alist of forked session id to the session id it was forked from."
+  :type 'file
+  :group 'agent-shell-dashboard)
+
 (defcustom agent-shell-dashboard-identifier-to-config-fn-alist
   '((claude-code . agent-shell-anthropic-make-claude-code-config))
   "Map an agent's `:identifier' symbol to its config-builder function.
@@ -409,6 +415,53 @@ Returns non-nil when the row ended up marked."
       (agent-shell-dashboard--set-marks
        (append marks (list (agent-shell-dashboard--mark-entry row))))
       t)))
+
+;;; Fork lineage
+
+(defvar agent-shell-dashboard--fork-lineage 'unloaded)
+
+(defun agent-shell-dashboard--fork-lineage ()
+  (when (eq agent-shell-dashboard--fork-lineage 'unloaded)
+    (setq agent-shell-dashboard--fork-lineage
+          (and agent-shell-dashboard-fork-lineage-file
+               (file-exists-p agent-shell-dashboard-fork-lineage-file)
+               (with-temp-buffer
+                 (insert-file-contents agent-shell-dashboard-fork-lineage-file)
+                 (condition-case nil (read (current-buffer)) (error nil))))))
+  agent-shell-dashboard--fork-lineage)
+
+(defun agent-shell-dashboard--record-fork-lineage ()
+  "Persist the parent of every live forked session not yet recorded.
+A fork gets a fresh session id, so the only link back to its parent is
+the `:fork-session-id' its buffer started with, which is gone once the
+buffer is."
+  (let* ((lineage (agent-shell-dashboard--fork-lineage))
+         (new (delq nil
+                    (mapcar
+                     (lambda (buf)
+                       (let* ((state (buffer-local-value 'agent-shell--state buf))
+                              (parent (map-elt state :fork-session-id))
+                              (child (map-nested-elt state '(:session :id))))
+                         (and parent child (not (equal parent child))
+                              (not (assoc child lineage))
+                              (cons child parent))))
+                     (agent-shell-dashboard--all-buffers)))))
+    (when new
+      (setq agent-shell-dashboard--fork-lineage (append new lineage))
+      (when agent-shell-dashboard-fork-lineage-file
+        (with-temp-file agent-shell-dashboard-fork-lineage-file
+          (let ((print-length nil) (print-level nil))
+            (insert ";; -*- mode: lisp-data; -*-\n")
+            (prin1 agent-shell-dashboard--fork-lineage (current-buffer))
+            (insert "\n")))))))
+
+(defun agent-shell-dashboard--fork-root (session-id)
+  (let ((lineage (agent-shell-dashboard--fork-lineage))
+        (seen nil))
+    (while (and (assoc session-id lineage) (not (member session-id seen)))
+      (push session-id seen)
+      (setq session-id (cdr (assoc session-id lineage))))
+    session-id))
 
 (defun agent-shell-dashboard--tombstone-session (session-id)
   "Add SESSION-ID to the forgotten-ids file, idempotent."
