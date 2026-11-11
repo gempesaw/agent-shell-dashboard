@@ -20,6 +20,7 @@
 
 (require 'json)
 (require 'map)
+(require 'color)
 (require 'agent-shell-dashboard-data)
 (require 'agent-shell-dashboard-render)
 
@@ -90,12 +91,17 @@ The default listens on every interface so other machines can reach it;
 
 ;;;; Serialization
 
+(defun agent-shell-dashboard-web--hex (color)
+  (if-let* ((rgb (and (stringp color) (color-name-to-rgb color))))
+      (apply #'color-rgb-to-hex (append rgb '(2)))
+    color))
+
 (defun agent-shell-dashboard-web--color (face attribute)
   (let ((value (pcase attribute
                  (:foreground (face-foreground face nil t))
                  (:background (face-background face nil t)))))
     (if (and (stringp value) (not (string-prefix-p "unspecified" value)))
-        value
+        (agent-shell-dashboard-web--hex value)
       :null)))
 
 (defun agent-shell-dashboard-web--glyph (row)
@@ -104,7 +110,8 @@ The default listens on every interface so other machines can reach it;
                  (agent-shell-dashboard--row-is-today row)))
          (face (get-text-property 0 'face glyph)))
     (list :char (substring-no-properties glyph)
-          :color (cond ((and (consp face) (plist-get face :foreground)))
+          :color (cond ((and (consp face) (plist-get face :foreground))
+                        (agent-shell-dashboard-web--hex (plist-get face :foreground)))
                        ((symbolp face) (agent-shell-dashboard-web--color face :foreground))
                        (t :null)))))
 
@@ -172,6 +179,57 @@ The default listens on every interface so other machines can reach it;
       (signal 'user-error (list (format "No agent-shell buffer %S" name))))
     buffer))
 
+(defun agent-shell-dashboard-web--face-style (face)
+  (let ((faces (if (and (consp face) (not (keywordp (car face)))) face (list face)))
+        (default-fg (face-foreground 'default nil t))
+        (default-bg (face-background 'default nil t))
+        fg bg bold italic underline)
+    (dolist (f faces)
+      (let ((get (lambda (attribute)
+                   (let ((value (cond ((and (symbolp f) (facep f))
+                                       (face-attribute f attribute nil t))
+                                      ((consp f) (plist-get f attribute)))))
+                     (unless (or (null value) (eq value 'unspecified)) value)))))
+        (unless fg
+          (let ((v (funcall get :foreground)))
+            (when (and (stringp v) (not (equal v default-fg))) (setq fg v))))
+        (unless bg
+          (let ((v (funcall get :background)))
+            (when (and (stringp v) (not (equal v default-bg))) (setq bg v))))
+        (unless bold
+          (setq bold (memq (funcall get :weight) '(bold semi-bold extra-bold ultra-bold heavy))))
+        (unless italic
+          (setq italic (memq (funcall get :slant) '(italic oblique))))
+        (unless underline
+          (setq underline (funcall get :underline)))))
+    (list :fg (if fg (agent-shell-dashboard-web--hex fg) :null)
+          :bg (if bg (agent-shell-dashboard-web--hex bg) :null)
+          :bold (if bold t :false) :italic (if italic t :false)
+          :underline (if underline t :false))))
+
+(defun agent-shell-dashboard-web--runs (start end)
+  "Runs of text between START and END as (TEXT STYLE HIDDEN), plus styles."
+  (let ((styles (list (list :fg :null :bg :null :bold :false :italic :false :underline :false)))
+        (index (make-hash-table :test 'equal))
+        runs
+        (pos start))
+    (while (< pos end)
+      (let* ((next (min end (next-char-property-change pos end)))
+             (face (or (get-char-property pos 'face)
+                       (get-char-property pos 'font-lock-face)))
+             (style (if (or (null face) (eq face 'default))
+                        0
+                      (or (gethash face index)
+                          (progn
+                            (setq styles (append styles (list (agent-shell-dashboard-web--face-style face))))
+                            (puthash face (1- (length styles)) index))))))
+        (push (vector (buffer-substring-no-properties pos next)
+                      style
+                      (if (invisible-p pos) 1 0))
+              runs)
+        (setq pos next)))
+    (cons (vconcat (nreverse runs)) (vconcat styles))))
+
 (defun agent-shell-dashboard-web--session (buffer known-tick)
   (with-current-buffer buffer
     (let ((tick (buffer-modified-tick))
@@ -179,13 +237,15 @@ The default listens on every interface so other machines can reach it;
           (queued (vconcat (map-elt agent-shell--state :pending-prompts))))
       (if (equal tick known-tick)
           (list :tick tick :unchanged t :busy busy :queued queued)
-        (let ((start (max (point-min) (- (point-max) agent-shell-dashboard-web-buffer-limit))))
+        (let* ((start (max (point-min) (- (point-max) agent-shell-dashboard-web-buffer-limit)))
+               (runs (agent-shell-dashboard-web--runs start (point-max))))
           (list :tick tick
                 :busy busy
                 :queued queued
                 :truncated (if (> start (point-min)) t :false)
                 :summary (or agent-shell-dashboard--buffer-summary :null)
-                :text (buffer-substring-no-properties start (point-max))))))))
+                :runs (car runs)
+                :styles (cdr runs)))))))
 
 (defun agent-shell-dashboard-web--send (buffer prompt)
   (setq prompt (s-trim (or prompt "")))

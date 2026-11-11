@@ -50,6 +50,8 @@
   #queued { padding: 0 14px 4px; }
   #closed { padding: 14px; }
   .busy { color: #a8b6ff; }
+  #text .inv { display: none; }
+  #text.show-inv .inv { display: inline; opacity: .55; }
 
   #auth { display: none; padding: 40px; max-width: 640px; }
   #auth input { width: 100%; margin: 10px 0; }
@@ -89,6 +91,7 @@
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
     <span class="grow"></span>
+    <label class="shadow"><input type="checkbox" id="show-hidden"> hidden</label>
     <button id="stop" onclick="interrupt()">stop</button>
   </div>
   <div id="summary" class="shadow"></div>
@@ -240,7 +243,14 @@ async function loadSession() {
   if (s.unchanged) return;
   const pre = $("text");
   const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 80 || tick === null;
-  pre.textContent = (s.truncated ? "… (earlier output trimmed)\n\n" : "") + s.text;
+  const css = s.styles.map((st) => [
+    st.fg && `color:${st.fg}`, st.bg && `background:${st.bg}`,
+    st.bold && "font-weight:bold", st.italic && "font-style:italic",
+    st.underline && "text-decoration:underline",
+  ].filter(Boolean).join(";"));
+  pre.innerHTML = (s.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
+    s.runs.map(([text, style, hidden]) =>
+      `<span${hidden ? ' class="inv"' : ""}${css[style] ? ` style="${css[style]}"` : ""}>${esc(text)}</span>`).join("");
   if (s.summary) $("summary").textContent = s.summary.split("\n")[0];
   if (atBottom) pre.scrollTop = pre.scrollHeight;
   tick = s.tick;
@@ -303,6 +313,7 @@ $("prompt").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 $("search").addEventListener("input", renderDashboard);
+$("show-hidden").addEventListener("change", (e) => $("text").classList.toggle("show-inv", e.target.checked));
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
 $("show-closed").addEventListener("change", (e) => {
   localStorage.setItem("asd-closed", e.target.checked ? "1" : "0");
