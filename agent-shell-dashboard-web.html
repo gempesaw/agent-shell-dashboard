@@ -127,11 +127,21 @@ if (location.hash && !location.hash.startsWith("#/")) {
   history.replaceState(null, "", location.pathname);
 }
 
+function loadFont() {
+  if (!token || document.getElementById("emacs-font")) return;
+  const link = document.createElement("link");
+  link.id = "emacs-font";
+  link.rel = "stylesheet";
+  link.href = "/font.css?token=" + encodeURIComponent(token);
+  document.head.appendChild(link);
+}
+
 function saveToken() {
   const v = $("token-input").value.trim();
   token = v.includes("#") ? v.slice(v.indexOf("#") + 1) : v;
   localStorage.setItem("asd-token", token);
   $("auth").style.display = "none";
+  loadFont();
   route();
 }
 
@@ -346,7 +356,7 @@ $("show-closed").addEventListener("change", (e) => {
 });
 window.addEventListener("hashchange", route);
 if (!token) $("auth").style.display = "block", $("dashboard").style.display = "none";
-else route();
+else { loadFont(); route(); }
 </script>
 </body>
 </html>

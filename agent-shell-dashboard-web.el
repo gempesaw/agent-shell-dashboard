@@ -21,6 +21,7 @@
 (require 'json)
 (require 'map)
 (require 'color)
+(require 'url-util)
 (require 'agent-shell-dashboard-data)
 (require 'agent-shell-dashboard-render)
 
@@ -51,6 +52,14 @@ local."
 (defcustom agent-shell-dashboard-web-buffer-limit 400000
   "Characters from the end of a session buffer sent to the browser."
   :type 'integer
+  :group 'agent-shell-dashboard)
+
+(defcustom agent-shell-dashboard-web-font-directories
+  '("~/Library/Fonts" "/Library/Fonts" "~/.local/share/fonts")
+  "Directories searched for files of the default face's font family.
+Matching files are served to the page, so it renders in the same font as
+Emacs on machines that do not have it installed."
+  :type '(repeat directory)
   :group 'agent-shell-dashboard)
 
 (defvar agent-shell-dashboard-web--server nil)
@@ -269,18 +278,61 @@ local."
       (setq agent-shell-dashboard-web--snapshot nil)
       (list :buffer (if (buffer-live-p buffer) (buffer-name buffer) :null)))))
 
+;;;; Fonts
+
+(defun agent-shell-dashboard-web--font-family ()
+  (let ((family (face-attribute 'default :family nil t)))
+    (and (stringp family) family)))
+
+(defun agent-shell-dashboard-web--font-files ()
+  (when-let* ((family (agent-shell-dashboard-web--font-family))
+              (prefix (concat (replace-regexp-in-string " " "" family) "-")))
+    (seq-mapcat
+     (lambda (directory)
+       (and (file-directory-p directory)
+            (directory-files (expand-file-name directory) t
+                             (concat "\\`" (regexp-quote prefix)
+                                     ".*\\.\\(otf\\|ttf\\|woff2?\\)\\'"))))
+     agent-shell-dashboard-web-font-directories)))
+
+(defun agent-shell-dashboard-web--font-css (token)
+  (let ((family (agent-shell-dashboard-web--font-family)))
+    (concat
+     (mapconcat
+      (lambda (file)
+        (let ((name (file-name-base file)))
+          (format "@font-face { font-family: %S; src: url(\"/font/%s?token=%s\"); font-weight: %d; font-style: %s; }\n"
+                  family
+                  (url-hexify-string (file-name-nondirectory file))
+                  (url-hexify-string token)
+                  (cond ((string-match-p "ExtraBold\\|Black\\|Heavy" name) 800)
+                        ((string-match-p "SemiBold\\|DemiBold" name) 600)
+                        ((string-match-p "Bold" name) 700)
+                        ((string-match-p "Medium" name) 500)
+                        ((string-match-p "Light" name) 300)
+                        (t 400))
+                  (if (string-match-p "Italic\\|Oblique" name) "italic" "normal"))))
+      (agent-shell-dashboard-web--font-files) "")
+     (when family
+       (format "html, body, button, input, textarea { font-family: %S, ui-monospace, \"SF Mono\", Menlo, monospace; }\n"
+               family)))))
+
+(defun agent-shell-dashboard-web--font-file (name)
+  (seq-find (lambda (file) (equal (file-name-nondirectory file) name))
+            (agent-shell-dashboard-web--font-files)))
+
 ;;;; HTTP
 
-(defun agent-shell-dashboard-web--respond (process status type body)
-  (let ((bytes (encode-coding-string body 'utf-8)))
+(defun agent-shell-dashboard-web--respond (process status type body &optional cache)
+  (let ((bytes (if (multibyte-string-p body) (encode-coding-string body 'utf-8) body)))
     (when (process-live-p process)
       (process-send-string
        process
-       (concat (format "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+       (concat (format "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nCache-Control: %s\r\nConnection: close\r\n\r\n"
                        status
                        (pcase status (200 "OK") (401 "Unauthorized") (404 "Not Found")
                               (400 "Bad Request") (_ "Error"))
-                       type (length bytes))
+                       type (length bytes) (if cache "private, max-age=86400" "no-store"))
                bytes))
       (process-send-eof process))))
 
@@ -294,8 +346,29 @@ local."
     (and given
          (string= given (concat "Bearer " (agent-shell-dashboard-web--token))))))
 
-(defun agent-shell-dashboard-web--dispatch (process method path headers body)
+(defun agent-shell-dashboard-web--dispatch (process method path query headers body)
   (cond
+   ((and (equal method "GET") (string-prefix-p "/font" path))
+    (if (not (equal (car (alist-get "token" query nil nil #'equal))
+                    (agent-shell-dashboard-web--token)))
+        (agent-shell-dashboard-web--json process 401 '(:error "unauthorized"))
+      (if (equal path "/font.css")
+          (agent-shell-dashboard-web--respond
+           process 200 "text/css; charset=utf-8"
+           (agent-shell-dashboard-web--font-css (agent-shell-dashboard-web--token)) t)
+        (if-let* ((file (agent-shell-dashboard-web--font-file
+                         (url-unhex-string (string-remove-prefix "/font/" path)))))
+            (agent-shell-dashboard-web--respond
+             process 200
+             (pcase (file-name-extension file)
+               ("otf" "font/otf") ("ttf" "font/ttf") ("woff" "font/woff") (_ "font/woff2"))
+             (with-temp-buffer
+               (set-buffer-multibyte nil)
+               (insert-file-contents-literally file)
+               (buffer-string))
+             t)
+          (agent-shell-dashboard-web--json process 404 '(:error "no such font"))))))
+
    ((and (equal method "GET") (member path '("/" "/index.html")))
     (agent-shell-dashboard-web--respond
      process 200 "text/html; charset=utf-8"
@@ -345,9 +418,11 @@ local."
                                         (cons (downcase (match-string 1 line))
                                               (match-string 2 line))))
                                     (cdr lines))))
-             (path (car (split-string (or (nth 1 request-line) "/") "?")))
+             (target (split-string (or (nth 1 request-line) "/") "?"))
+             (path (car target))
+             (query (url-parse-query-string (or (cadr target) "")))
              (body (decode-coding-string (substring request (+ head-end 4)) 'utf-8)))
-        (agent-shell-dashboard-web--dispatch process (car request-line) path headers body))
+        (agent-shell-dashboard-web--dispatch process (car request-line) path query headers body))
     (user-error
      (agent-shell-dashboard-web--json process 400 (list :error (error-message-string err))))
     (error
