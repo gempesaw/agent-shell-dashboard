@@ -65,6 +65,11 @@ Emacs on machines that do not have it installed."
 (defvar agent-shell-dashboard-web--server nil)
 (defvar agent-shell-dashboard-web--token nil)
 (defvar agent-shell-dashboard-web--snapshot nil)
+(defvar agent-shell-dashboard-web--closed nil
+  "Closed rows and their serialized form: (TIME LIVE-IDS ROWS . SERIALIZED).")
+(defvar agent-shell-dashboard-web--transcripts (make-hash-table :test 'eq :weakness 'key))
+(defvar agent-shell-dashboard-web--last-request nil)
+(defvar agent-shell-dashboard-web--maintenance nil)
 
 (defconst agent-shell-dashboard-web--page
   (expand-file-name "agent-shell-dashboard-web.html"
@@ -154,8 +159,48 @@ Emacs on machines that do not have it installed."
           :marked (if (agent-shell-dashboard-row-marked-p row) t :false)
           :recency (symbol-name (or (and live (agent-shell-dashboard--row-recency row)) 'none)))))
 
+(defun agent-shell-dashboard-web--live-ids ()
+  (sort (delq nil (mapcar (lambda (buffer)
+                            (map-nested-elt (buffer-local-value 'agent-shell--state buffer)
+                                            '(:session :id)))
+                          (agent-shell-dashboard--all-buffers)))
+        #'string<))
+
+(defun agent-shell-dashboard-web--refresh-closed ()
+  (let ((rows (--remove (plist-get it :buffer) (agent-shell-dashboard--rows)))
+        (serialized (make-hash-table :test 'equal)))
+    (dolist (row rows)
+      (puthash (plist-get row :session-id) (agent-shell-dashboard-web--row row nil) serialized))
+    (setq agent-shell-dashboard-web--closed
+          (cons (current-time)
+                (cons (agent-shell-dashboard-web--live-ids)
+                      (cons rows serialized))))))
+
+(defun agent-shell-dashboard-web--closed-stale-p ()
+  (or (null agent-shell-dashboard-web--closed)
+      (> (float-time (time-subtract nil (car agent-shell-dashboard-web--closed))) 60)
+      (not (equal (cadr agent-shell-dashboard-web--closed)
+                  (agent-shell-dashboard-web--live-ids)))))
+
+(defun agent-shell-dashboard-web--maintain ()
+  "Rebuild closed rows while Emacs is idle and a browser is watching.
+They come from disk and rarely change, so rebuilding them on request
+would stall Emacs for every poll; live rows are cheap and stay fresh."
+  (when (and agent-shell-dashboard-web--last-request
+             (< (float-time (time-subtract nil agent-shell-dashboard-web--last-request)) 120)
+             (agent-shell-dashboard-web--closed-stale-p))
+    (agent-shell-dashboard-web--refresh-closed)))
+
 (defun agent-shell-dashboard-web--sessions ()
-  (let* ((rows (agent-shell-dashboard--rows))
+  (unless agent-shell-dashboard-web--closed
+    (agent-shell-dashboard-web--refresh-closed))
+  (let* ((live (delq nil (mapcar #'agent-shell-dashboard--row-from-buffer
+                                 (agent-shell-dashboard--all-buffers))))
+         (live-ids (mapcar (lambda (row) (plist-get row :session-id)) live))
+         (closed (--remove (member (plist-get it :session-id) live-ids)
+                           (car (cddr agent-shell-dashboard-web--closed))))
+         (serialized (cdr (cddr agent-shell-dashboard-web--closed)))
+         (rows (sort (append live closed) #'agent-shell-dashboard--row-less-p))
          (fork-index (agent-shell-dashboard--compute-fork-index rows))
          (groups (agent-shell-dashboard--group-rows rows))
          (pinned (--keep (assoc it groups) agent-shell-dashboard-pinned-projects)))
@@ -164,19 +209,23 @@ Emacs on machines that do not have it installed."
                        :shadow (agent-shell-dashboard-web--color 'shadow :foreground)
                        :header (agent-shell-dashboard-web--color 'font-lock-function-name-face
                                                                  :foreground))
-          :live (length (--filter (plist-get it :buffer) rows))
-          :closed (length (--remove (plist-get it :buffer) rows))
+          :live (length live)
+          :closed (length closed)
           :pinned (vconcat (mapcar #'car pinned))
           :groups (vconcat
                    (mapcar (lambda (group)
                              (list :project (if (s-blank? (car group)) "(none)" (car group))
                                    :rows (vconcat
                                           (mapcar (lambda (row)
-                                                    (agent-shell-dashboard-web--row row fork-index))
+                                                    (if (plist-get row :buffer)
+                                                        (agent-shell-dashboard-web--row row fork-index)
+                                                      (or (gethash (plist-get row :session-id) serialized)
+                                                          (agent-shell-dashboard-web--row row nil))))
                                                   (cdr group)))))
                            (append pinned (--remove (memq it pinned) groups)))))))
 
 (defun agent-shell-dashboard-web--sessions-json ()
+  (setq agent-shell-dashboard-web--last-request (current-time))
   (let ((cached agent-shell-dashboard-web--snapshot))
     (if (and cached (< (float-time (time-subtract nil (car cached))) 2))
         (cdr cached)
@@ -218,36 +267,53 @@ Emacs on machines that do not have it installed."
           :bold (if bold t :false) :italic (if italic t :false)
           :underline (if underline t :false))))
 
-(defun agent-shell-dashboard-web--runs (start end)
-  "Runs between START and END as [TEXT STYLE HIDDEN SECTION ROLE], plus styles."
+(defun agent-shell-dashboard-web--runs (start end &optional reveal)
+  "Runs between START and END, as (RUNS STYLES SECTIONS).
+Each run is [TEXT STYLE HIDDEN SECTION ROLE], SECTION an index into
+SECTIONS or -1.  Unless REVEAL, invisible text is left out: it is most
+of a session buffer, and copying it on every update costs a garbage
+collection.  A collapsed section's body becomes one empty marker run, so
+the page knows it exists and can fetch it when opened."
   (let ((styles (list (list :fg :null :bg :null :bold :false :italic :false :underline :false)))
-        (index (make-hash-table :test 'equal))
+        (style-index (make-hash-table :test 'equal))
+        (sections nil)
+        (section-index (make-hash-table :test 'equal))
         runs
         (pos start))
     (while (< pos end)
       (let* ((next (min end (next-char-property-change pos end)))
-             (face (or (get-char-property pos 'face)
-                       (get-char-property pos 'font-lock-face)))
-             (style (if (or (null face) (eq face 'default))
-                        0
-                      (or (gethash face index)
-                          (progn
-                            (setq styles (append styles (list (agent-shell-dashboard-web--face-style face))))
-                            (puthash face (1- (length styles)) index))))))
-        (let* ((role (get-text-property pos 'agent-shell-ui-section))
-               (state (and role (get-text-property pos 'agent-shell-ui-state))))
-          (push (vector (buffer-substring-no-properties pos next)
-                        style
-                        (if (invisible-p pos) 1 0)
-                        (or (map-elt state :qualified-id) "")
-                        (pcase role
-                          ('indicator "i")
-                          ((or 'label-left 'label-right) "l")
-                          ('body "b")
-                          (_ "")))
-                runs))
+             (role (get-text-property pos 'agent-shell-ui-section))
+             (id (and role (map-elt (get-text-property pos 'agent-shell-ui-state) :qualified-id)))
+             (code (pcase role
+                     ('indicator "i")
+                     ((or 'label-left 'label-right) "l")
+                     ('body "b")
+                     (_ "")))
+             (hidden (and (not reveal) (invisible-p pos)))
+             (section (if id
+                          (or (gethash id section-index)
+                              (progn (push id sections)
+                                     (puthash id (1- (length sections)) section-index)))
+                        -1)))
+        (cond
+         ((and hidden (not (equal code "b"))))
+         ((and hidden
+               (let ((last (car runs)))
+                 (and last (= (aref last 2) 1) (= (aref last 3) section)))))
+         (t
+          (let* ((face (or (get-char-property pos 'face)
+                           (get-char-property pos 'font-lock-face)))
+                 (style (if (or (null face) (eq face 'default))
+                            0
+                          (or (gethash face style-index)
+                              (progn
+                                (setq styles (append styles (list (agent-shell-dashboard-web--face-style face))))
+                                (puthash face (1- (length styles)) style-index))))))
+            (push (vector (if hidden "" (buffer-substring-no-properties pos next))
+                          style (if hidden 1 0) section code)
+                  runs))))
         (setq pos next)))
-    (cons (vconcat (nreverse runs)) (vconcat styles))))
+    (list (vconcat (nreverse runs)) (vconcat styles) (vconcat (nreverse sections)))))
 
 (defun agent-shell-dashboard-web--session (buffer known-tick)
   (with-current-buffer buffer
@@ -256,15 +322,39 @@ Emacs on machines that do not have it installed."
           (queued (vconcat (map-elt agent-shell--state :pending-prompts))))
       (if (equal tick known-tick)
           (list :tick tick :unchanged t :busy busy :queued queued)
-        (let* ((start (max (point-min) (- (point-max) agent-shell-dashboard-web-buffer-limit)))
-               (runs (agent-shell-dashboard-web--runs start (point-max))))
-          (list :tick tick
-                :busy busy
-                :queued queued
-                :truncated (if (> start (point-min)) t :false)
-                :summary (or agent-shell-dashboard--buffer-summary :null)
-                :runs (car runs)
-                :styles (cdr runs)))))))
+        (let ((cached (gethash buffer agent-shell-dashboard-web--transcripts)))
+          (if (equal (car cached) tick)
+              (cdr cached)
+            (let* ((start (max (point-min) (- (point-max) agent-shell-dashboard-web-buffer-limit)))
+                   (runs (agent-shell-dashboard-web--runs start (point-max)))
+                   (json (json-serialize
+                          (list :tick tick
+                                :busy busy
+                                :queued queued
+                                :truncated (if (> start (point-min)) t :false)
+                                :summary (or agent-shell-dashboard--buffer-summary :null)
+                                :runs (nth 0 runs)
+                                :styles (nth 1 runs)
+                                :sections (nth 2 runs)))))
+              (puthash buffer (cons tick json) agent-shell-dashboard-web--transcripts)
+              json)))))))
+
+(defun agent-shell-dashboard-web--section (buffer section)
+  (with-current-buffer buffer
+    (let ((pos (max (point-min) (- (point-max) agent-shell-dashboard-web-buffer-limit)))
+          start end)
+      (while (and (< pos (point-max)) (not end))
+        (let ((next (min (next-single-property-change pos 'agent-shell-ui-section nil (point-max))
+                         (next-single-property-change pos 'agent-shell-ui-state nil (point-max)))))
+          (when (and (eq (get-text-property pos 'agent-shell-ui-section) 'body)
+                     (equal (map-elt (get-text-property pos 'agent-shell-ui-state) :qualified-id)
+                            section))
+            (setq start pos end next))
+          (setq pos next)))
+      (unless start
+        (signal 'user-error (list (format "No section %s" section))))
+      (let ((runs (agent-shell-dashboard-web--runs start end t)))
+        (list :runs (nth 0 runs) :styles (nth 1 runs))))))
 
 (defun agent-shell-dashboard-web--send (buffer prompt)
   (setq prompt (s-trim (or prompt "")))
@@ -403,6 +493,10 @@ Emacs on machines that do not have it installed."
           (agent-shell-dashboard-web--session
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
            (plist-get args :tick)))
+         ("/api/section"
+          (agent-shell-dashboard-web--section
+           (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
+           (plist-get args :section)))
          ("/api/send"
           (agent-shell-dashboard-web--send
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
@@ -459,6 +553,8 @@ Emacs on machines that do not have it installed."
   "Serve the dashboard over HTTP and copy its URL."
   (interactive)
   (agent-shell-dashboard-web-stop)
+  (setq agent-shell-dashboard-web--maintenance
+        (run-with-idle-timer 2 t #'agent-shell-dashboard-web--maintain))
   (setq agent-shell-dashboard-web--server
         (make-network-process
          :name "agent-shell-dashboard-web"
@@ -477,6 +573,9 @@ Emacs on machines that do not have it installed."
   (interactive)
   (when (process-live-p agent-shell-dashboard-web--server)
     (delete-process agent-shell-dashboard-web--server))
+  (when agent-shell-dashboard-web--maintenance
+    (cancel-timer agent-shell-dashboard-web--maintenance)
+    (setq agent-shell-dashboard-web--maintenance nil))
   (setq agent-shell-dashboard-web--server nil))
 
 (provide 'agent-shell-dashboard-web)

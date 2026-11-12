@@ -66,7 +66,6 @@
   #text .inv { display: none; }
   #text [data-r="i"], #text [data-r="l"] { cursor: pointer; }
   #text [data-r="l"]:hover { text-decoration: underline; }
-  #text.show-inv .inv { display: inline; opacity: .55; }
 
   #auth { display: none; padding: 40px; max-width: 640px; }
   #auth input { width: 100%; margin: 10px 0; }
@@ -108,7 +107,6 @@
     <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
-    <label class="shadow"><input type="checkbox" id="show-hidden"> hidden</label>
     <button id="stop" onclick="interrupt()">cancel</button>
   </div>
   <div id="summary" class="shadow"></div>
@@ -303,25 +301,59 @@ async function loadSession() {
 
 let shown = null;
 let toggled = new Map();
+let bodies = new Map();
 
-function paint() {
-  if (!shown) return;
-  const css = shown.styles.map((st) => [
+function styleCss(styles) {
+  return styles.map((st) => [
     st.fg && `color:${st.fg}`, st.bg && `background:${st.bg}`,
     st.bold && "font-weight:bold", st.italic && "font-style:italic",
     st.underline && "text-decoration:underline",
   ].filter(Boolean).join(";"));
+}
+
+function runsHtml(runs, styles) {
+  const css = styleCss(styles);
+  return runs.map(([text, style]) =>
+    `<span${css[style] ? ` style="${css[style]}"` : ""}>${esc(text)}</span>`).join("");
+}
+
+async function loadBody(sec) {
+  bodies.set(sec, '<span class="shadow">…</span>');
+  try {
+    const r = await api("/api/section", { buffer: current.buffer, section: sec });
+    bodies.set(sec, runsHtml(r.runs, r.styles));
+  } catch (e) {
+    bodies.set(sec, `<span class="shadow">(${esc(e.message)})</span>`);
+  }
+  paint();
+}
+
+function paint() {
+  if (!shown) return;
+  const css = styleCss(shown.styles);
+  const emitted = new Set();
+  const name = (i) => (i >= 0 ? shown.sections[i] : "");
   const collapsedInEmacs = new Map();
-  for (const [, , hidden, sec, role] of shown.runs)
-    if (sec && role === "b") collapsedInEmacs.set(sec, !!hidden);
+  for (const [, , hidden, i, role] of shown.runs)
+    if (i >= 0 && role === "b") collapsedInEmacs.set(name(i), !!hidden);
   const open = (sec) => toggled.has(sec) ? toggled.get(sec) : !collapsedInEmacs.get(sec);
 
   $("text").innerHTML = (shown.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
-    shown.runs.map(([text, style, hidden, sec, role]) => {
+    shown.runs.map(([text, style, hidden, i, role]) => {
+      const sec = name(i);
       if (sec && collapsedInEmacs.has(sec)) {
-        if (role === "b") hidden = !open(sec);
+        if (role === "b") {
+          if (!open(sec)) return "";
+          if (!text) {
+            if (emitted.has(sec)) return "";
+            emitted.add(sec);
+            return `<span data-b="${esc(sec)}">${bodies.get(sec) ?? '<span class="shadow">…</span>'}</span>`;
+          }
+          hidden = false;
+        }
         if (role === "i") text = text.replace(/^[▶▼]/, open(sec) ? "▼" : "▶");
       }
+      if (hidden && !text) return "";
       const attrs = (hidden ? ' class="inv"' : "") + (css[style] ? ` style="${css[style]}"` : "") +
         (sec && (role === "i" || role === "l") ? ` data-s="${esc(sec)}" data-r="${role}"` : "") +
         (sec && role === "b" ? ` data-b="${esc(sec)}"` : "");
@@ -333,9 +365,11 @@ $("text").addEventListener("click", (e) => {
   const head = e.target.closest("[data-s]");
   if (!head || getSelection().toString()) return;
   const sec = head.dataset.s;
-  const body = shown.runs.find(([, , , s, r]) => s === sec && r === "b");
+  const index = shown.sections.indexOf(sec);
+  const body = shown.runs.find(([, , , s, r]) => s === index && r === "b");
   const isOpen = toggled.has(sec) ? toggled.get(sec) : !(body && body[2]);
   toggled.set(sec, !isOpen);
+  if (!isOpen && body && !body[0] && !bodies.has(sec)) loadBody(sec);
   paint();
 });
 
@@ -389,6 +423,7 @@ function route() {
     tick = null;
     shown = null;
     toggled = new Map();
+    bodies = new Map();
     $("dashboard").style.display = "none";
     $("session").style.display = "flex";
     document.body.classList.add("in-session");
@@ -426,7 +461,6 @@ $("prompt").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 $("search").addEventListener("input", renderDashboard);
-$("show-hidden").addEventListener("change", (e) => $("text").classList.toggle("show-inv", e.target.checked));
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
 $("show-closed").addEventListener("change", (e) => {
   localStorage.setItem("asd-closed", e.target.checked ? "1" : "0");
