@@ -34,10 +34,11 @@
   :type 'integer
   :group 'agent-shell-dashboard)
 
-(defcustom agent-shell-dashboard-web-host "0.0.0.0"
+(defcustom agent-shell-dashboard-web-host "::"
   "Address the web dashboard binds to.
-The default listens on every interface so other machines can reach it;
-\"127.0.0.1\" keeps it local."
+The default listens on every interface, IPv4 and IPv6, so other machines
+can reach it however they resolve this host's name; \"::1\" keeps it
+local."
   :type 'string
   :group 'agent-shell-dashboard)
 
@@ -380,7 +381,7 @@ The default listens on every interface so other machines can reach it;
          :server t
          :host agent-shell-dashboard-web-host
          :service agent-shell-dashboard-web-port
-         :family 'ipv4
+         :family 'ipv6
          :coding 'binary
          :noquery t
          :filter #'agent-shell-dashboard-web--filter
