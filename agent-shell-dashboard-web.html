@@ -65,6 +65,7 @@
   .busy { color: #a8b6ff; }
   #text .inv { display: none; }
   #text [data-r="i"], #text [data-r="l"] { cursor: pointer; }
+  #text { touch-action: pan-y pinch-zoom; }
   #text [data-r="l"]:hover { text-decoration: underline; }
 
   #auth { display: none; padding: 40px; max-width: 640px; }
@@ -243,12 +244,20 @@ function tabLabel(r) {
   return text.length > 32 ? text.slice(0, 31) + "…" : text;
 }
 
+let tabOrder = [];
+
 function renderTabs() {
   if (!data || !current) return;
   const rows = data.groups.flatMap((g) => g.rows).filter((r) => r.live &&
     (r.marked || r.recency === "recent" || r.status === "working" || r.buffer === current.buffer));
-  rows.sort((a, b) => b.time - a.time);
-  $("tabs").innerHTML = rows.slice(0, 14).map((r) => `<div class="tab ${r.buffer === current.buffer ? "active" : ""}"
+  const byBuffer = new Map(rows.map((r) => [r.buffer, r]));
+  if (!tabOrder.length) tabOrder = [...rows].sort((a, b) => b.time - a.time).map((r) => r.buffer);
+  tabOrder = tabOrder.filter((b) => byBuffer.has(b));
+  for (const r of [...rows].sort((a, b) => b.time - a.time))
+    if (!tabOrder.includes(r.buffer)) tabOrder.push(r.buffer);
+  tabOrder = tabOrder.slice(0, 14);
+  if (!tabOrder.includes(current.buffer) && byBuffer.has(current.buffer)) tabOrder.push(current.buffer);
+  $("tabs").innerHTML = tabOrder.map((b) => byBuffer.get(b)).map((r) => `<div class="tab ${r.buffer === current.buffer ? "active" : ""}"
       style="background:${r.tint || "rgba(255,255,255,.06)"}" data-tab="${esc(r.buffer)}"
       title="${esc(r.buffer + " — " + (r.summary || ""))}">
       <span style="color:${r.glyph.color || "inherit"}">${esc(r.glyph.char)}</span> ${esc(tabLabel(r))}</div>`).join("");
@@ -467,6 +476,45 @@ $("show-closed").addEventListener("change", (e) => {
   renderDashboard();
 });
 window.addEventListener("hashchange", route);
+
+function switchTab(step) {
+  const i = tabOrder.indexOf(current?.buffer);
+  const next = i < 0 ? null : tabOrder[i + step];
+  if (next) go("s/" + encodeURIComponent(next));
+  return !!next;
+}
+
+(() => {
+  const pane = $("text");
+  let x0 = null, y0 = 0, horizontal = null, dx = 0;
+  const settle = () => {
+    pane.style.transition = "transform .18s ease, opacity .18s ease";
+    pane.style.transform = "";
+    pane.style.opacity = "";
+  };
+  pane.addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    x0 = e.touches.length === 1 && t.clientX > 24 && t.clientX < innerWidth - 24 ? t.clientX : null;
+    y0 = t.clientY; horizontal = null; dx = 0;
+  }, { passive: true });
+  pane.addEventListener("touchmove", (e) => {
+    if (x0 === null) return;
+    dx = e.touches[0].clientX - x0;
+    const dy = e.touches[0].clientY - y0;
+    if (horizontal === null && Math.hypot(dx, dy) > 12) horizontal = Math.abs(dx) > Math.abs(dy) * 1.5;
+    if (!horizontal) return;
+    pane.style.transition = "none";
+    pane.style.transform = `translateX(${dx * 0.4}px)`;
+    pane.style.opacity = String(1 - Math.min(0.4, Math.abs(dx) / 600));
+  }, { passive: true });
+  const end = () => {
+    if (horizontal && Math.abs(dx) > 70) switchTab(dx < 0 ? 1 : -1);
+    x0 = null;
+    settle();
+  };
+  pane.addEventListener("touchend", end);
+  pane.addEventListener("touchcancel", end);
+})();
 if (!token) $("auth").style.display = "block", $("dashboard").style.display = "none";
 else { loadFont(); route(); }
 </script>
