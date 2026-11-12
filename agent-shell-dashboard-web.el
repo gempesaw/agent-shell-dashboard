@@ -151,7 +151,8 @@ Emacs on machines that do not have it installed."
                           :color (nth (mod fork (length agent-shell-dashboard-fork-colors))
                                       agent-shell-dashboard-fork-colors))
                   :null)
-          :marked (if (agent-shell-dashboard-row-marked-p row) t :false))))
+          :marked (if (agent-shell-dashboard-row-marked-p row) t :false)
+          :recency (symbol-name (or (and live (agent-shell-dashboard--row-recency row)) 'none)))))
 
 (defun agent-shell-dashboard-web--sessions ()
   (let* ((rows (agent-shell-dashboard--rows))

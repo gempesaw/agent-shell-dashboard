@@ -45,6 +45,14 @@
   #session .title { flex: 1 1 auto; min-width: 0; }
   #session .bar { gap: 8px; }
   #text .pending { opacity: .55; }
+  #tabs { display: flex; gap: 4px; overflow-x: auto; padding: 6px 10px 0;
+    border-bottom: 1px solid rgba(255,255,255,.12); scrollbar-width: none; }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; max-width: 240px; padding: 4px 10px; border-radius: 6px 6px 0 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+    opacity: .7; border: 1px solid transparent; border-bottom: none; }
+  .tab:hover { opacity: 1; }
+  .tab.active { opacity: 1; border-color: rgba(255,255,255,.35); font-weight: bold; }
   #session .title { font-weight: bold; color: var(--header); overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   #summary { padding: 4px 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -93,6 +101,7 @@
 </div>
 
 <div id="session">
+  <div id="tabs"></div>
   <div class="bar">
     <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
@@ -229,6 +238,28 @@ async function loadDashboard() {
   renderDashboard();
 }
 
+function tabLabel(r) {
+  const text = (r.summary || r.buffer || "").split(";")[0].trim();
+  return text.length > 32 ? text.slice(0, 31) + "…" : text;
+}
+
+function renderTabs() {
+  if (!data || !current) return;
+  const rows = data.groups.flatMap((g) => g.rows).filter((r) => r.live &&
+    (r.marked || r.recency === "recent" || r.status === "working" || r.buffer === current.buffer));
+  rows.sort((a, b) => b.time - a.time);
+  $("tabs").innerHTML = rows.slice(0, 14).map((r) => `<div class="tab ${r.buffer === current.buffer ? "active" : ""}"
+      style="background:${r.tint || "rgba(255,255,255,.06)"}" data-tab="${esc(r.buffer)}"
+      title="${esc(r.buffer + " — " + (r.summary || ""))}">
+      <span style="color:${r.glyph.color || "inherit"}">${esc(r.glyph.char)}</span> ${esc(tabLabel(r))}</div>`).join("");
+  $("tabs").querySelector(".active")?.scrollIntoView({ inline: "nearest", block: "nearest" });
+}
+
+async function loadTabs() {
+  data = await api("/api/sessions");
+  renderTabs();
+}
+
 function findRow(buffer, session) {
   for (const g of data?.groups || [])
     for (const r of g.rows)
@@ -326,8 +357,15 @@ function route() {
     $("session-name").textContent = current.buffer || "";
     $("summary").textContent = findRow(current.buffer, current.session_id)?.summary || "";
     $("text").textContent = "loading…";
+    renderTabs();
     loadSession().catch(console.error);
-    timer = setInterval(() => { if (!document.hidden) loadSession().catch(console.error); }, 1500);
+    loadTabs().catch(console.error);
+    let beat = 0;
+    timer = setInterval(() => {
+      if (document.hidden) return;
+      loadSession().catch(console.error);
+      if (++beat % 2 === 0) loadTabs().catch(console.error);
+    }, 1500);
   } else {
     current = null;
     document.body.classList.remove("in-session");
@@ -339,6 +377,8 @@ function route() {
 }
 
 document.addEventListener("click", (e) => {
+  const tab = e.target.closest(".tab");
+  if (tab) return go("s/" + encodeURIComponent(tab.dataset.tab));
   const row = e.target.closest(".row");
   if (!row) return;
   if (row.dataset.buffer) go("s/" + encodeURIComponent(row.dataset.buffer));
