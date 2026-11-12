@@ -64,6 +64,8 @@
   #closed { padding: 14px; }
   .busy { color: #a8b6ff; }
   #text .inv { display: none; }
+  #text [data-r="i"], #text [data-r="l"] { cursor: pointer; }
+  #text [data-r="l"]:hover { text-decoration: underline; }
   #text.show-inv .inv { display: inline; opacity: .55; }
 
   #auth { display: none; padding: 40px; max-width: 640px; }
@@ -283,25 +285,59 @@ async function loadSession() {
   $("closed").style.display = "none";
   $("compose").style.display = "flex";
   $("stop").style.display = "";
-  const s = await api("/api/session", { buffer: current.buffer, tick });
+  const buffer = current.buffer;
+  const s = await api("/api/session", { buffer, tick });
+  if (current?.buffer !== buffer) return;
   $("state").textContent = s.busy ? "working…" : "idle";
   $("state").className = s.busy ? "busy" : "shadow";
   $("queued").textContent = s.queued.length ? `queued: ${s.queued.join(" | ")}` : "";
   if (s.unchanged) return;
   const pre = $("text");
   const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 80 || tick === null;
-  const css = s.styles.map((st) => [
-    st.fg && `color:${st.fg}`, st.bg && `background:${st.bg}`,
-    st.bold && "font-weight:bold", st.italic && "font-style:italic",
-    st.underline && "text-decoration:underline",
-  ].filter(Boolean).join(";"));
-  pre.innerHTML = (s.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
-    s.runs.map(([text, style, hidden]) =>
-      `<span${hidden ? ' class="inv"' : ""}${css[style] ? ` style="${css[style]}"` : ""}>${esc(text)}</span>`).join("");
+  shown = s;
+  paint();
   if (s.summary) $("summary").textContent = s.summary.split("\n")[0];
   if (atBottom) pre.scrollTop = pre.scrollHeight;
   tick = s.tick;
 }
+
+let shown = null;
+let toggled = new Map();
+
+function paint() {
+  if (!shown) return;
+  const css = shown.styles.map((st) => [
+    st.fg && `color:${st.fg}`, st.bg && `background:${st.bg}`,
+    st.bold && "font-weight:bold", st.italic && "font-style:italic",
+    st.underline && "text-decoration:underline",
+  ].filter(Boolean).join(";"));
+  const collapsedInEmacs = new Map();
+  for (const [, , hidden, sec, role] of shown.runs)
+    if (sec && role === "b") collapsedInEmacs.set(sec, !!hidden);
+  const open = (sec) => toggled.has(sec) ? toggled.get(sec) : !collapsedInEmacs.get(sec);
+
+  $("text").innerHTML = (shown.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
+    shown.runs.map(([text, style, hidden, sec, role]) => {
+      if (sec && collapsedInEmacs.has(sec)) {
+        if (role === "b") hidden = !open(sec);
+        if (role === "i") text = text.replace(/^[▶▼]/, open(sec) ? "▼" : "▶");
+      }
+      const attrs = (hidden ? ' class="inv"' : "") + (css[style] ? ` style="${css[style]}"` : "") +
+        (sec && (role === "i" || role === "l") ? ` data-s="${esc(sec)}" data-r="${role}"` : "") +
+        (sec && role === "b" ? ` data-b="${esc(sec)}"` : "");
+      return `<span${attrs}>${esc(text)}</span>`;
+    }).join("");
+}
+
+$("text").addEventListener("click", (e) => {
+  const head = e.target.closest("[data-s]");
+  if (!head || getSelection().toString()) return;
+  const sec = head.dataset.s;
+  const body = shown.runs.find(([, , , s, r]) => s === sec && r === "b");
+  const isOpen = toggled.has(sec) ? toggled.get(sec) : !(body && body[2]);
+  toggled.set(sec, !isOpen);
+  paint();
+});
 
 let sending = false;
 
@@ -351,6 +387,8 @@ function route() {
   if (m) {
     current = m[1] === "s" ? { buffer: decodeURIComponent(m[2]) } : { session_id: decodeURIComponent(m[2]) };
     tick = null;
+    shown = null;
+    toggled = new Map();
     $("dashboard").style.display = "none";
     $("session").style.display = "flex";
     document.body.classList.add("in-session");

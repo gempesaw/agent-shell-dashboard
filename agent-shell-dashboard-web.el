@@ -219,7 +219,7 @@ Emacs on machines that do not have it installed."
           :underline (if underline t :false))))
 
 (defun agent-shell-dashboard-web--runs (start end)
-  "Runs of text between START and END as (TEXT STYLE HIDDEN), plus styles."
+  "Runs between START and END as [TEXT STYLE HIDDEN SECTION ROLE], plus styles."
   (let ((styles (list (list :fg :null :bg :null :bold :false :italic :false :underline :false)))
         (index (make-hash-table :test 'equal))
         runs
@@ -234,10 +234,18 @@ Emacs on machines that do not have it installed."
                           (progn
                             (setq styles (append styles (list (agent-shell-dashboard-web--face-style face))))
                             (puthash face (1- (length styles)) index))))))
-        (push (vector (buffer-substring-no-properties pos next)
-                      style
-                      (if (invisible-p pos) 1 0))
-              runs)
+        (let* ((role (get-text-property pos 'agent-shell-ui-section))
+               (state (and role (get-text-property pos 'agent-shell-ui-state))))
+          (push (vector (buffer-substring-no-properties pos next)
+                        style
+                        (if (invisible-p pos) 1 0)
+                        (or (map-elt state :qualified-id) "")
+                        (pcase role
+                          ('indicator "i")
+                          ((or 'label-left 'label-right) "l")
+                          ('body "b")
+                          (_ "")))
+                runs))
         (setq pos next)))
     (cons (vconcat (nreverse runs)) (vconcat styles))))
 
