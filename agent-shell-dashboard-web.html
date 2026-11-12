@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>Agent Shell</title>
 <style>
   :root { --bg: #5a5475; --fg: #f8f8f2; --shadow: #b8a2ce; --header: #c2ffdf; }
@@ -39,12 +39,17 @@
   .fork { font-weight: bold; }
   .flat .row .project { color: var(--header); }
 
-  #session { display: none; flex-direction: column; height: 100vh; }
+  #session { display: none; flex-direction: column; height: 100vh; height: 100dvh; }
+  body.in-session { overflow: hidden; }
+  #session > * { min-width: 0; }
+  #session .title { flex: 1 1 auto; min-width: 0; }
+  #session .bar { gap: 8px; }
+  #text .pending { opacity: .55; }
   #session .title { font-weight: bold; color: var(--header); overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   #summary { padding: 4px 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #text { flex: 1; overflow: auto; margin: 0; padding: 10px 14px;
-    white-space: pre-wrap; word-break: break-word; }
+    white-space: pre-wrap; overflow-wrap: anywhere; }
   #compose { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,.12); }
   #prompt { flex: 1; min-height: 3.4em; max-height: 40vh; resize: vertical; }
   #queued { padding: 0 14px 4px; }
@@ -62,6 +67,8 @@
     .col, #rest { width: 100%; }
     #rest { grid-template-columns: 1fr; }
     #search { width: 100%; }
+    .wide { display: none; }
+    #prompt { font-size: 16px; }
   }
 </style>
 </head>
@@ -87,10 +94,9 @@
 
 <div id="session">
   <div class="bar">
-    <button onclick="go('')">← back</button>
+    <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
-    <span class="grow"></span>
     <label class="shadow"><input type="checkbox" id="show-hidden"> hidden</label>
     <button id="stop" onclick="interrupt()">cancel</button>
   </div>
@@ -256,15 +262,32 @@ async function loadSession() {
   tick = s.tick;
 }
 
+let sending = false;
+
 async function send() {
   const prompt = $("prompt").value.trim();
-  if (!prompt || !current?.buffer) return;
+  if (!prompt || !current?.buffer || sending) return;
+  sending = true;
+  $("prompt").value = "";
+
+  const pre = $("text");
+  const pending = document.createElement("span");
+  pending.className = "pending";
+  pending.textContent = "\n" + prompt + "\n";
+  pre.appendChild(pending);
+  pre.scrollTop = pre.scrollHeight;
+
   try {
     await api("/api/send", { buffer: current.buffer, prompt });
-    $("prompt").value = "";
     tick = null;
-    setTimeout(loadSession, 400);
-  } catch (e) { alert("Send failed: " + e.message); }
+    loadSession().catch(console.error);
+  } catch (e) {
+    pending.remove();
+    if (!$("prompt").value) $("prompt").value = prompt;
+    alert("Send failed: " + e.message);
+  } finally {
+    sending = false;
+  }
 }
 
 async function interrupt() {
@@ -289,6 +312,7 @@ function route() {
     tick = null;
     $("dashboard").style.display = "none";
     $("session").style.display = "flex";
+    document.body.classList.add("in-session");
     $("session-name").textContent = current.buffer || "";
     $("summary").textContent = findRow(current.buffer, current.session_id)?.summary || "";
     $("text").textContent = "loading…";
@@ -296,6 +320,7 @@ function route() {
     timer = setInterval(() => { if (!document.hidden) loadSession().catch(console.error); }, 1500);
   } else {
     current = null;
+    document.body.classList.remove("in-session");
     $("session").style.display = "none";
     $("dashboard").style.display = "block";
     loadDashboard().catch(console.error);
