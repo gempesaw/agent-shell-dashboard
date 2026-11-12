@@ -92,7 +92,7 @@
     <span id="state" class="shadow"></span>
     <span class="grow"></span>
     <label class="shadow"><input type="checkbox" id="show-hidden"> hidden</label>
-    <button id="stop" onclick="interrupt()">stop</button>
+    <button id="stop" onclick="interrupt()">cancel</button>
   </div>
   <div id="summary" class="shadow"></div>
   <pre id="text"></pre>
@@ -268,7 +268,7 @@ async function send() {
 }
 
 async function interrupt() {
-  if (current?.buffer && confirm("Interrupt this session?"))
+  if (current?.buffer)
     await api("/api/interrupt", { buffer: current.buffer }).catch((e) => alert(e.message));
 }
 
