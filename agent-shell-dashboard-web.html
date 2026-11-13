@@ -75,6 +75,12 @@
   #text { touch-action: pan-y pinch-zoom; }
   #text [data-r="l"]:hover { text-decoration: underline; }
 
+  #progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 10;
+    pointer-events: none; opacity: 0; transition: opacity .15s;
+    background: linear-gradient(90deg, transparent, #ffb8d1, #c5a3ff, transparent);
+    background-size: 50% 100%; background-repeat: no-repeat; }
+  #progress.on { opacity: 1; animation: sweep 1s linear infinite; }
+  @keyframes sweep { from { background-position: -50% 0; } to { background-position: 150% 0; } }
   #auth { display: none; padding: 40px; max-width: 640px; }
   #auth input { width: 100%; margin: 10px 0; }
 
@@ -91,6 +97,7 @@
 </head>
 <body>
 
+<div id="progress"></div>
 <div id="auth">
   <h2>Token needed</h2>
   <p class="shadow">Run <code>M-x agent-shell-dashboard-web-url</code> in Emacs and open
@@ -162,6 +169,37 @@ function saveToken() {
   $("auth").style.display = "none";
   loadFont();
   route();
+}
+
+let pending = 0, progressTimer = null;
+
+async function withProgress(promise) {
+  if (pending++ === 0)
+    progressTimer = setTimeout(() => $("progress").classList.add("on"), 120);
+  try { return await promise; }
+  finally {
+    if (--pending === 0) { clearTimeout(progressTimer); $("progress").classList.remove("on"); }
+  }
+}
+
+const sessionCache = new Map();
+
+function remember(buffer, s) {
+  sessionCache.delete(buffer);
+  sessionCache.set(buffer, s);
+  while (sessionCache.size > 12) sessionCache.delete(sessionCache.keys().next().value);
+}
+
+async function prefetchNeighbors() {
+  const i = tabOrder.indexOf(current?.buffer);
+  if (i < 0) return;
+  for (const b of [tabOrder[i + 1], tabOrder[i - 1]]) {
+    if (!b || sessionCache.has(b)) continue;
+    try {
+      const s = await api("/api/session", { buffer: b });
+      if (!s.unchanged) remember(b, s);
+    } catch (e) { /* best effort */ }
+  }
 }
 
 async function api(path, body) {
@@ -310,6 +348,7 @@ async function loadSession() {
   $("state").className = s.busy ? "busy" : "shadow";
   $("queued").textContent = s.queued.length ? `queued: ${s.queued.join(" | ")}` : "";
   if (s.unchanged) return;
+  remember(buffer, s);
   const pre = $("text");
   const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 80 || tick === null;
   shown = s;
@@ -431,7 +470,7 @@ let projects = [];
 async function newSession(dir) {
   $("new-menu").style.display = "none";
   try {
-    const r = await api("/api/new", { dir });
+    const r = await withProgress(api("/api/new", { dir }));
     if (r.buffer) go("s/" + encodeURIComponent(r.buffer));
   } catch (e) { alert("Could not start a session: " + e.message); }
 }
@@ -454,7 +493,7 @@ async function toggleNewMenu() {
 
 async function resume() {
   try {
-    const r = await api("/api/resume", { session_id: current.session_id });
+    const r = await withProgress(api("/api/resume", { session_id: current.session_id }));
     if (r.buffer) go("s/" + encodeURIComponent(r.buffer));
   } catch (e) { alert("Resume failed: " + e.message); }
 }
@@ -475,9 +514,18 @@ function route() {
     document.body.classList.add("in-session");
     $("session-name").textContent = current.buffer || "";
     $("summary").textContent = findRow(current.buffer, current.session_id)?.summary || "";
-    $("text").textContent = "loading…";
+    const cached = current.buffer && sessionCache.get(current.buffer);
     renderTabs();
-    loadSession().catch(console.error);
+    if (cached) {
+      shown = cached;
+      tick = cached.tick;
+      paint();
+      $("text").scrollTop = $("text").scrollHeight;
+      loadSession().then(() => setTimeout(prefetchNeighbors, 300)).catch(console.error);
+    } else {
+      $("text").textContent = "";
+      withProgress(loadSession()).then(() => setTimeout(prefetchNeighbors, 300)).catch(console.error);
+    }
     loadTabs().catch(console.error);
     let beat = 0;
     timer = setInterval(() => {
