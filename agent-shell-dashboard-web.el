@@ -156,6 +156,7 @@ Emacs on machines that do not have it installed."
                           :color (nth (mod fork (length agent-shell-dashboard-fork-colors))
                                       agent-shell-dashboard-fork-colors))
                   :null)
+          :cwd (or (plist-get row :cwd) :null)
           :marked (if (agent-shell-dashboard-row-marked-p row) t :false)
           :recency (symbol-name (or (and live (agent-shell-dashboard--row-recency row)) 'none)))))
 
@@ -356,6 +357,38 @@ the page knows it exists and can fetch it when opened."
       (let ((runs (agent-shell-dashboard-web--runs start end t)))
         (list :runs (nth 0 runs) :styles (nth 1 runs))))))
 
+(defun agent-shell-dashboard-web--projects ()
+  "Directories a session may be started in, most recently used first.
+Only places the dashboard already knows — projects with sessions and
+projectile's list — so the page cannot start an agent anywhere else."
+  (let ((seen (make-hash-table :test 'equal))
+        projects)
+    (dolist (dir (append
+                  (delq nil (mapcar (lambda (row) (plist-get row :cwd))
+                                    (agent-shell-dashboard--rows)))
+                  (and (boundp 'projectile-known-projects) projectile-known-projects)))
+      (let ((dir (file-name-as-directory (expand-file-name dir))))
+        (when (and (not (gethash dir seen)) (file-directory-p dir))
+          (puthash dir t seen)
+          (push (list :name (file-name-nondirectory (directory-file-name dir)) :dir dir)
+                projects))))
+    (nreverse projects)))
+
+(defun agent-shell-dashboard-web--new-session (dir)
+  (let ((dir (file-name-as-directory (expand-file-name (or dir "")))))
+    (unless (--any? (equal (plist-get it :dir) dir) (agent-shell-dashboard-web--projects))
+      (signal 'user-error (list (format "Not a known project: %s" dir))))
+    (let* ((config-fn (cdar agent-shell-dashboard-identifier-to-config-fn-alist))
+           (before (agent-shell-dashboard--all-buffers))
+           (default-directory dir)
+           (agent-shell-cwd-function (lambda () dir))
+           (agent-shell-session-strategy 'new))
+      (save-window-excursion
+        (agent-shell-start :config (funcall config-fn)))
+      (setq agent-shell-dashboard-web--snapshot nil)
+      (let ((buffer (car (-difference (agent-shell-dashboard--all-buffers) before))))
+        (list :buffer (if (buffer-live-p buffer) (buffer-name buffer) :null))))))
+
 (defun agent-shell-dashboard-web--send (buffer prompt)
   (setq prompt (s-trim (or prompt "")))
   (when (s-blank? prompt)
@@ -506,6 +539,10 @@ the page knows it exists and can fetch it when opened."
                                 (plist-get args :buffer))
             (agent-shell-interrupt t))
           '(:ok t))
+         ("/api/projects"
+          (list :projects (vconcat (agent-shell-dashboard-web--projects))))
+         ("/api/new"
+          (agent-shell-dashboard-web--new-session (plist-get args :dir)))
          ("/api/resume"
           (agent-shell-dashboard-web--resume (plist-get args :session_id)))
          (_ (signal 'user-error (list (format "Unknown endpoint %s" path))))))))))

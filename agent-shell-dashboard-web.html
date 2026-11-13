@@ -38,6 +38,13 @@
   .ago { display: inline-block; width: 8ch; }
   .fork { font-weight: bold; }
   .flat .row .project { color: var(--header); }
+  .col h2 .new { font-size: 13px; padding: 0 7px; margin-left: 6px; vertical-align: middle; }
+  #new-menu { display: none; position: absolute; right: 14px; top: 44px; z-index: 5;
+    max-height: 60vh; overflow: auto; min-width: 260px; background: var(--bg);
+    border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
+  #new-menu input { width: 100%; margin-bottom: 6px; }
+  #new-menu div { padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+  #new-menu div:hover { background: rgba(255,255,255,.12); }
 
   #session { display: none; flex-direction: column; height: 100vh; height: 100dvh; }
   body.in-session { overflow: hidden; }
@@ -96,9 +103,11 @@
   <div class="bar">
     <span id="counts" class="shadow">Agent Shell</span>
     <span class="grow"></span>
+    <button onclick="toggleNewMenu()">+ new</button>
     <label class="shadow"><input type="checkbox" id="show-closed"> closed</label>
     <input id="search" placeholder="search (literal, space-separated)" autocomplete="off">
   </div>
+  <div id="new-menu"><input id="new-filter" placeholder="project…" autocomplete="off"><div id="new-list"></div></div>
   <div id="board"><div id="pinned"></div><div id="rest"></div></div>
 </div>
 
@@ -201,8 +210,10 @@ function columnHtml(group, showClosed) {
   const rows = group.rows.filter((r) => showClosed || r.live);
   const live = group.rows.filter((r) => r.live).length;
   if (!rows.length) return "";
+  const dir = group.rows.find((r) => r.cwd)?.cwd;
   return `<div class="col ${live ? "" : "empty"}">
-    <h2>${esc(group.project)} <span class="shadow">(${live} live, ${group.rows.length - live} closed)</span></h2>
+    <h2>${esc(group.project)} <span class="shadow">(${live} live, ${group.rows.length - live} closed)</span>${dir
+      ? ` <button class="new" data-new="${esc(dir)}" title="new session in ${esc(dir)}">+</button>` : ""}</h2>
     ${rows.map((r) => rowHtml(r)).join("")}
   </div>`;
 }
@@ -415,6 +426,32 @@ async function interrupt() {
     await api("/api/interrupt", { buffer: current.buffer }).catch((e) => alert(e.message));
 }
 
+let projects = [];
+
+async function newSession(dir) {
+  $("new-menu").style.display = "none";
+  try {
+    const r = await api("/api/new", { dir });
+    if (r.buffer) go("s/" + encodeURIComponent(r.buffer));
+  } catch (e) { alert("Could not start a session: " + e.message); }
+}
+
+function renderNewList() {
+  const q = $("new-filter").value.toLowerCase();
+  $("new-list").innerHTML = projects.filter((p) => (p.name + " " + p.dir).toLowerCase().includes(q))
+    .map((p) => `<div data-new="${esc(p.dir)}" title="${esc(p.dir)}">${esc(p.name)} <span class="shadow">${esc(p.dir)}</span></div>`).join("");
+}
+
+async function toggleNewMenu() {
+  const menu = $("new-menu");
+  if (menu.style.display === "block") { menu.style.display = "none"; return; }
+  menu.style.display = "block";
+  $("new-filter").value = "";
+  projects = (await api("/api/projects")).projects;
+  renderNewList();
+  $("new-filter").focus();
+}
+
 async function resume() {
   try {
     const r = await api("/api/resume", { session_id: current.session_id });
@@ -459,6 +496,9 @@ function route() {
 }
 
 document.addEventListener("click", (e) => {
+  const fresh = e.target.closest("[data-new]");
+  if (fresh) return newSession(fresh.dataset.new);
+  if (!e.target.closest("#new-menu, [onclick^='toggleNewMenu']")) $("new-menu").style.display = "none";
   const tab = e.target.closest(".tab");
   if (tab) return go("s/" + encodeURIComponent(tab.dataset.tab));
   const row = e.target.closest(".row");
@@ -470,6 +510,11 @@ $("prompt").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 $("search").addEventListener("input", renderDashboard);
+$("new-filter").addEventListener("input", renderNewList);
+$("new-filter").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { const first = $("new-list").querySelector("[data-new]"); if (first) newSession(first.dataset.new); }
+  if (e.key === "Escape") $("new-menu").style.display = "none";
+});
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
 $("show-closed").addEventListener("change", (e) => {
   localStorage.setItem("asd-closed", e.target.checked ? "1" : "0");
