@@ -548,6 +548,22 @@ projectile's list — so the page cannot start an agent anywhere else."
                               (list :name (or (map-elt cmd 'name) "")
                                     :description (or (map-elt cmd 'description) "")))
                             (map-elt agent-shell--state :available-commands))))))
+         ("/api/unfork-targets"
+          (let ((source (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))))
+            (list :targets
+                  (vconcat
+                   (seq-map (lambda (buffer)
+                              (list :buffer (buffer-name buffer)
+                                    :summary (or (buffer-local-value
+                                                  'agent-shell-dashboard--buffer-summary buffer)
+                                                 "")))
+                            (agent-shell-dashboard--fork-relatives source))))))
+         ("/api/unfork"
+          (agent-shell-dashboard--unfork-into
+           (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
+           (agent-shell-dashboard-web--session-buffer (plist-get args :target))
+           (eq (plist-get args :close) t))
+          '(:ok t))
          ("/api/section"
           (agent-shell-dashboard-web--section
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))

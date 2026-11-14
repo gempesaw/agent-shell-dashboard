@@ -42,6 +42,14 @@
   #new-menu { display: none; position: absolute; right: 14px; top: 44px; z-index: 5;
     max-height: 60vh; overflow: auto; min-width: 260px; background: var(--bg);
     border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
+  #session .bar { position: relative; }
+  #unfork-menu { display: none; position: absolute; right: 14px; top: 100%; z-index: 5;
+    max-height: 60vh; overflow: auto; width: min(520px, calc(100% - 28px)); background: var(--bg);
+    border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
+  #unfork-menu label { display: block; padding: 4px 8px; }
+  #unfork-menu div { padding: 6px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  #unfork-menu div:hover { background: rgba(255,255,255,.12); }
   #new-menu input { width: 100%; margin-bottom: 6px; }
   #new-menu div { padding: 4px 8px; border-radius: 4px; cursor: pointer; }
   #new-menu div:hover { background: rgba(255,255,255,.12); }
@@ -138,7 +146,13 @@
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
     <button class="refresh" onclick="refresh()" title="refresh">↻</button>
+    <button id="unfork" onclick="toggleUnforkMenu()" style="display:none">unfork</button>
     <button id="stop" onclick="interrupt()">cancel</button>
+    <div id="unfork-menu">
+      <label><input type="checkbox" id="unfork-close"> close this fork once delivered</label>
+      <div class="shadow" style="cursor:default">fold this fork's work into:</div>
+      <div id="unfork-list"></div>
+    </div>
   </div>
   <div id="summary" class="shadow"></div>
   <pre id="text"></pre>
@@ -521,6 +535,41 @@ async function interrupt() {
     await api("/api/interrupt", { buffer: current.buffer }).catch((e) => alert(e.message));
 }
 
+let unforkTargets = [];
+let unforkFor = null;
+
+async function checkUnfork() {
+  const buffer = current?.buffer;
+  $("unfork").style.display = "none";
+  $("unfork-menu").style.display = "none";
+  unforkFor = buffer;
+  unforkTargets = [];
+  if (!buffer) return;
+  const r = await api("/api/unfork-targets", { buffer }).catch(() => ({ targets: [] }));
+  if (unforkFor !== buffer) return;
+  unforkTargets = r.targets;
+  $("unfork").style.display = unforkTargets.length ? "" : "none";
+}
+
+function toggleUnforkMenu() {
+  const menu = $("unfork-menu");
+  if (menu.style.display === "block") { menu.style.display = "none"; return; }
+  $("unfork-close").checked = false;
+  $("unfork-list").innerHTML = unforkTargets.map((t, i) =>
+    `<div data-unfork="${esc(t.buffer)}">${esc(t.buffer)}${i === 0 ? " (oldest)" : ""} <span class="shadow">${esc(t.summary)}</span></div>`).join("");
+  menu.style.display = "block";
+}
+
+async function unfork(target) {
+  $("unfork-menu").style.display = "none";
+  const close = $("unfork-close").checked;
+  try {
+    await withProgress(api("/api/unfork", { buffer: current.buffer, target, close }));
+    tick = null;
+    loadSession().catch(console.error);
+  } catch (e) { alert("Unfork failed: " + e.message); }
+}
+
 let projects = [];
 
 async function newSession(dir) {
@@ -572,6 +621,7 @@ function route() {
     $("summary").textContent = findRow(current.buffer, current.session_id)?.summary || "";
     const cached = current.buffer && sessionCache.get(current.buffer);
     renderTabs();
+    checkUnfork();
     if (cached) {
       shown = cached;
       tick = cached.tick;
@@ -600,6 +650,9 @@ function route() {
 }
 
 document.addEventListener("click", (e) => {
+  const into = e.target.closest("[data-unfork]");
+  if (into) return unfork(into.dataset.unfork);
+  if (!e.target.closest("#unfork-menu, #unfork")) $("unfork-menu").style.display = "none";
   const fresh = e.target.closest("[data-new]");
   if (fresh) return newSession(fresh.dataset.new);
   if (!e.target.closest("#new-menu, [onclick^='toggleNewMenu']")) $("new-menu").style.display = "none";
@@ -700,7 +753,7 @@ $("search").addEventListener("input", renderDashboard);
 $("new-filter").addEventListener("input", renderNewList);
 $("new-filter").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { const first = $("new-list").querySelector("[data-new]"); if (first) newSession(first.dataset.new); }
-  if (e.key === "Escape") $("new-menu").style.display = "none";
+  if (e.key === "Escape") { $("new-menu").style.display = "none"; $("unfork-menu").style.display = "none"; }
 });
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
 $("show-closed").addEventListener("change", (e) => {

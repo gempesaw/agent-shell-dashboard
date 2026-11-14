@@ -694,8 +694,11 @@ get their own column; beyond that, columns start stacking rows."
                      (user-error "Not in an agent-shell session")))
          (relatives (or (agent-shell-dashboard--fork-relatives source)
                         (user-error "%s has no live fork relatives" (buffer-name source))))
-         (target (agent-shell-dashboard--pick-unfork-target relatives))
-         (file (agent-shell-dashboard--unfork-file source))
+         (target (agent-shell-dashboard--pick-unfork-target relatives)))
+    (agent-shell-dashboard--unfork-into source target close)))
+
+(defun agent-shell-dashboard--unfork-into (source target close)
+  (let* ((file (agent-shell-dashboard--unfork-file source))
          (since (agent-shell-dashboard--first-prompt
                  (agent-shell-dashboard--transcript source))))
     (make-directory (file-name-directory file) t)
