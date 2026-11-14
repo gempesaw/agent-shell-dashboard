@@ -270,8 +270,8 @@ would stall Emacs for every poll; live rows are cheap and stay fresh."
 
 (defun agent-shell-dashboard-web--runs (start end &optional reveal)
   "Runs between START and END, as (RUNS STYLES SECTIONS).
-Each run is [TEXT STYLE HIDDEN SECTION ROLE], SECTION an index into
-SECTIONS or -1.  Unless REVEAL, invisible text is left out: it is most
+Each run is [TEXT STYLE HIDDEN SECTION ROLE URL], SECTION an index into
+SECTIONS or -1 and URL the link target, if any.  Unless REVEAL, invisible text is left out: it is most
 of a session buffer, and copying it on every update costs a garbage
 collection.  A collapsed section's body becomes one empty marker run, so
 the page knows it exists and can fetch it when opened."
@@ -311,7 +311,10 @@ the page knows it exists and can fetch it when opened."
                                 (setq styles (append styles (list (agent-shell-dashboard-web--face-style face))))
                                 (puthash face (1- (length styles)) style-index))))))
             (push (vector (if hidden "" (buffer-substring-no-properties pos next))
-                          style (if hidden 1 0) section code)
+                          style (if hidden 1 0) section code
+                          (let ((url (or (get-text-property pos 'agent-shell-markdown-url)
+                                         (get-text-property pos 'browse-url-data))))
+                            (if (and (not hidden) (stringp url)) url "")))
                   runs))))
         (setq pos next)))
     (list (vconcat (nreverse runs)) (vconcat styles) (vconcat (nreverse sections)))))

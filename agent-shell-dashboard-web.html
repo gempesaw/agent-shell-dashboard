@@ -73,6 +73,7 @@
   #text .inv { display: none; }
   #text [data-r="i"], #text [data-r="l"] { cursor: pointer; }
   #text { touch-action: pan-y pinch-zoom; }
+  #text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
   #text [data-r="l"]:hover { text-decoration: underline; }
 
   #progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 10;
@@ -370,10 +371,27 @@ function styleCss(styles) {
   ].filter(Boolean).join(";"));
 }
 
+const webUrl = /^https?:\/\//i;
+const bareUrl = /https?:\/\/[^\s<>"'`)\]]+[^\s<>"'`)\].,;:!?]/g;
+
+function anchor(url, inner) {
+  return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+}
+
+function linkify(text, url) {
+  if (url && webUrl.test(url)) return anchor(url, esc(text));
+  let out = "", last = 0;
+  for (const m of text.matchAll(bareUrl)) {
+    out += esc(text.slice(last, m.index)) + anchor(m[0], esc(m[0]));
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+
 function runsHtml(runs, styles) {
   const css = styleCss(styles);
-  return runs.map(([text, style]) =>
-    `<span${css[style] ? ` style="${css[style]}"` : ""}>${esc(text)}</span>`).join("");
+  return runs.map(([text, style, , , , url]) =>
+    `<span${css[style] ? ` style="${css[style]}"` : ""}>${linkify(text, url)}</span>`).join("");
 }
 
 async function loadBody(sec) {
@@ -398,7 +416,7 @@ function paint() {
   const open = (sec) => toggled.has(sec) ? toggled.get(sec) : !collapsedInEmacs.get(sec);
 
   $("text").innerHTML = (shown.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
-    shown.runs.map(([text, style, hidden, i, role]) => {
+    shown.runs.map(([text, style, hidden, i, role, url]) => {
       const sec = name(i);
       if (sec && collapsedInEmacs.has(sec)) {
         if (role === "b") {
@@ -416,11 +434,12 @@ function paint() {
       const attrs = (hidden ? ' class="inv"' : "") + (css[style] ? ` style="${css[style]}"` : "") +
         (sec && (role === "i" || role === "l") ? ` data-s="${esc(sec)}" data-r="${role}"` : "") +
         (sec && role === "b" ? ` data-b="${esc(sec)}"` : "");
-      return `<span${attrs}>${esc(text)}</span>`;
+      return `<span${attrs}>${linkify(text, url)}</span>`;
     }).join("");
 }
 
 $("text").addEventListener("click", (e) => {
+  if (e.target.closest("a")) return;
   const head = e.target.closest("[data-s]");
   if (!head || getSelection().toString()) return;
   const sec = head.dataset.s;
