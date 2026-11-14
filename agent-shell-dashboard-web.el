@@ -539,6 +539,15 @@ projectile's list — so the page cannot start an agent anywhere else."
           (agent-shell-dashboard-web--session
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
            (plist-get args :tick)))
+         ("/api/commands"
+          (with-current-buffer (agent-shell-dashboard-web--session-buffer
+                                (plist-get args :buffer))
+            (list :commands
+                  (vconcat
+                   (seq-map (lambda (cmd)
+                              (list :name (or (map-elt cmd 'name) "")
+                                    :description (or (map-elt cmd 'description) "")))
+                            (map-elt agent-shell--state :available-commands))))))
          ("/api/section"
           (agent-shell-dashboard-web--section
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))

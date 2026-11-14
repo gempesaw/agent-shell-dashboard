@@ -65,7 +65,15 @@
   #summary { padding: 4px 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #text { flex: 1; overflow: auto; margin: 0; padding: 10px 14px; font: inherit;
     white-space: pre-wrap; overflow-wrap: anywhere; }
-  #compose { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,.12); }
+  #compose { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,.12);
+    position: relative; }
+  #slash { position: absolute; left: 14px; right: 14px; bottom: 100%; max-height: 45vh; overflow: auto;
+    background: var(--bg, #1e1b2e); border: 1px solid rgba(255,255,255,.25); border-radius: 4px;
+    display: none; z-index: 10; }
+  #slash div { padding: 6px 10px; cursor: pointer; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  #slash div.sel { background: rgba(255,255,255,.12); }
+  #slash b { color: var(--header); font-weight: bold; }
   #prompt { flex: 1; min-height: 3.4em; max-height: 40vh; resize: vertical; }
   #queued { padding: 0 14px 4px; }
   #closed { padding: 14px; }
@@ -140,6 +148,7 @@
   </div>
   <div id="queued" class="shadow"></div>
   <div id="compose">
+    <div id="slash"></div>
     <textarea id="prompt" placeholder="Message (Enter to send, Shift+Enter for a newline)"></textarea>
     <button onclick="send()">send</button>
   </div>
@@ -601,7 +610,85 @@ document.addEventListener("click", (e) => {
   if (row.dataset.buffer) go("s/" + encodeURIComponent(row.dataset.buffer));
   else go("c/" + encodeURIComponent(row.dataset.session));
 });
+const commandCache = {};
+let slashItems = [];
+let slashSel = 0;
+
+async function commandsFor(buffer) {
+  if (!commandCache[buffer]?.length) {
+    commandCache[buffer] = (await api("/api/commands", { buffer })).commands;
+  }
+  return commandCache[buffer];
+}
+
+function slashQuery() {
+  const p = $("prompt");
+  const m = p.value.slice(0, p.selectionStart).match(/^\/(\S*)$/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function hideSlash() { slashItems = []; $("slash").style.display = "none"; }
+
+async function updateSlash() {
+  const q = slashQuery();
+  const buffer = current?.buffer;
+  if (q === null || !buffer) return hideSlash();
+  const all = await commandsFor(buffer);
+  if (slashQuery() !== q || current?.buffer !== buffer) return;
+
+  const starts = all.filter(c => c.name.toLowerCase().startsWith(q));
+  const contains = all.filter(c => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q));
+  slashItems = [...starts, ...contains];
+  slashSel = 0;
+  if (!slashItems.length) return hideSlash();
+
+  const box = $("slash");
+  box.innerHTML = "";
+  slashItems.forEach((c, i) => {
+    const div = document.createElement("div");
+    div.className = i === slashSel ? "sel" : "";
+    const b = document.createElement("b");
+    b.textContent = "/" + c.name;
+    div.append(b, document.createTextNode("  "));
+    const d = document.createElement("span");
+    d.className = "shadow";
+    d.textContent = c.description;
+    div.append(d);
+    div.addEventListener("pointerdown", (e) => { e.preventDefault(); pickSlash(i); });
+    box.append(div);
+  });
+  box.style.display = "block";
+}
+
+function pickSlash(i) {
+  const p = $("prompt");
+  const rest = p.value.slice(p.selectionStart).replace(/^\S*/, "");
+  p.value = "/" + slashItems[i].name + " " + rest.replace(/^\s+/, "");
+  const caret = slashItems[i].name.length + 2;
+  p.setSelectionRange(caret, caret);
+  hideSlash();
+  p.focus();
+}
+
+function moveSlash(delta) {
+  const rows = $("slash").children;
+  rows[slashSel]?.classList.remove("sel");
+  slashSel = (slashSel + delta + slashItems.length) % slashItems.length;
+  rows[slashSel].classList.add("sel");
+  rows[slashSel].scrollIntoView({ block: "nearest" });
+}
+
+$("prompt").addEventListener("input", updateSlash);
+$("prompt").addEventListener("blur", () => setTimeout(hideSlash, 150));
 $("prompt").addEventListener("keydown", (e) => {
+  if (slashItems.length) {
+    if (e.key === "ArrowDown") { e.preventDefault(); return moveSlash(1); }
+    if (e.key === "ArrowUp") { e.preventDefault(); return moveSlash(-1); }
+    if (e.key === "Escape") { e.preventDefault(); return hideSlash(); }
+    if ((e.key === "Tab" || e.key === "Enter") && !e.shiftKey && !e.isComposing) {
+      e.preventDefault(); return pickSlash(slashSel);
+    }
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst) { e.preventDefault(); send(); }
 });
 const touchFirst = matchMedia("(hover: none) and (pointer: coarse)").matches;
