@@ -12,6 +12,9 @@
 (require 'agent-shell-dashboard-data)
 (require 'agent-shell-dashboard-render)
 
+(declare-function agent-shell--busy-submit "agent-shell-prompt-queue")
+(declare-function agent-shell--insert-to-shell-buffer "agent-shell")
+
 (defvar agent-shell-dashboard-buffer-name "*agent-shell-dashboard*"
   "Name of the agent-shell dashboard buffer.")
 
@@ -558,6 +561,158 @@ get their own column; beyond that, columns start stacking rows."
         (balance-windows)
         (select-window (car columns))))
     (message "Showing %d marked session%s" n (if (= n 1) "" "s"))))
+
+;;; Unforking
+
+(defcustom agent-shell-dashboard-unfork-timeout 900
+  "Seconds to wait for a fork to write its summary before giving up."
+  :type 'integer
+  :group 'agent-shell-dashboard)
+
+(defun agent-shell-dashboard--unfork-source ()
+  (cond
+   ((derived-mode-p 'agent-shell-mode) (current-buffer))
+   ((and (derived-mode-p 'agent-shell-dashboard-mode)
+         (buffer-live-p (plist-get (agent-shell-dashboard--row-at-point) :buffer)))
+    (plist-get (agent-shell-dashboard--row-at-point) :buffer))
+   ((fboundp 'agent-shell--current-shell) (agent-shell--current-shell))))
+
+(defun agent-shell-dashboard--session-id (buffer)
+  (map-nested-elt (buffer-local-value 'agent-shell--state buffer) '(:session :id)))
+
+(defun agent-shell-dashboard--transcript (buffer)
+  (let ((file (buffer-local-value 'agent-shell--transcript-file buffer)))
+    (and file (file-exists-p file) file)))
+
+(defun agent-shell-dashboard--fork-relatives (buffer)
+  (agent-shell-dashboard--record-fork-lineage)
+  (let ((root (agent-shell-dashboard--fork-root
+               (agent-shell-dashboard--session-id buffer))))
+    (sort (--filter (and (not (eq it buffer))
+                         (agent-shell-dashboard--session-id it)
+                         (equal root (agent-shell-dashboard--fork-root
+                                      (agent-shell-dashboard--session-id it))))
+                    (agent-shell-dashboard--all-buffers))
+          (lambda (a b)
+            (let ((da (agent-shell-dashboard--fork-depth a))
+                  (db (agent-shell-dashboard--fork-depth b)))
+              (if (/= da db)
+                  (< da db)
+                (string< (or (agent-shell-dashboard--transcript a) "~")
+                         (or (agent-shell-dashboard--transcript b) "~"))))))))
+
+(defun agent-shell-dashboard--fork-depth (buffer)
+  (let ((lineage (agent-shell-dashboard--fork-lineage))
+        (id (agent-shell-dashboard--session-id buffer))
+        (depth 0))
+    (while (and (assoc id lineage) (< depth 100))
+      (setq id (cdr (assoc id lineage))
+            depth (1+ depth)))
+    depth))
+
+(defun agent-shell-dashboard--pick-unfork-target (relatives)
+  (if (null (cdr relatives))
+      (car relatives)
+    (let* ((choices (--map-indexed
+                     (cons (format "%s%s  %s"
+                                   (buffer-name it)
+                                   (if (zerop it-index) " (oldest)" "")
+                                   (or (agent-shell-dashboard--collapse-whitespace
+                                        (buffer-local-value
+                                         'agent-shell-dashboard--buffer-summary it))
+                                       ""))
+                           it)
+                     relatives))
+           (table (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity))
+                      (complete-with-action action (mapcar #'car choices) string pred)))))
+      (cdr (assoc (completing-read "Unfork into: " table nil t nil nil (caar choices))
+                  choices)))))
+
+(defun agent-shell-dashboard--first-prompt (transcript)
+  (when transcript
+    (with-temp-buffer
+      (insert-file-contents transcript nil 0 16384)
+      (goto-char (point-min))
+      (when (re-search-forward "^## User (" nil t)
+        (forward-line 1)
+        (skip-chars-forward " \t\n")
+        (truncate-string-to-width
+         (buffer-substring-no-properties (point) (line-end-position)) 120)))))
+
+(defun agent-shell-dashboard--unfork-file (source)
+  (let ((transcript (agent-shell-dashboard--transcript source)))
+    (expand-file-name
+     (format "%s.md" (agent-shell-dashboard--session-id source))
+     (if transcript
+         (expand-file-name "../unforks/" (file-name-directory transcript))
+       (expand-file-name "agent-shell-unforks/" temporary-file-directory)))))
+
+(defun agent-shell-dashboard--submit (buffer prompt)
+  (with-current-buffer buffer
+    (if (shell-maker-busy)
+        (agent-shell--busy-submit :prompt prompt)
+      (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t))))
+
+(defun agent-shell-dashboard--unfork-deliver (source target file close)
+  (let ((transcript (agent-shell-dashboard--transcript source)))
+    (agent-shell-dashboard--submit
+     target
+     (concat
+      (format "Merging back a fork. %s was forked from this conversation and went on to do work you have not seen."
+              (buffer-name source))
+      (format "\n\nIts account of everything since the fork is at:\n  %s" file)
+      (when transcript
+        (format "\n\nThe full record of that work, if the account is not enough:\n  %s" transcript))
+      "\n\nRead the account, then tell me in a few lines what changed and what you are carrying forward."))
+    (when close
+      (agent-shell-dashboard--unmark (list :buffer source
+                                           :session-id (agent-shell-dashboard--session-id source)))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer source)))
+    (message "Unforked %s into %s" (if close "and closed the fork" (buffer-name source))
+             (buffer-name target))))
+
+(defun agent-shell-dashboard--unfork-wait (source target file close deadline)
+  (cond
+   ((not (and (buffer-live-p source) (buffer-live-p target)))
+    (message "Unfork abandoned: a session went away"))
+   ((and (file-exists-p file)
+         (> (file-attribute-size (file-attributes file)) 0)
+         (not (with-current-buffer source (shell-maker-busy))))
+    (agent-shell-dashboard--unfork-deliver source target file close))
+   ((time-less-p deadline nil)
+    (message "Unfork gave up waiting for %s" file))
+   (t
+    (run-at-time 3 nil #'agent-shell-dashboard--unfork-wait
+                 source target file close deadline))))
+
+(defun agent-shell-dashboard-unfork (&optional close)
+  (interactive "P")
+  (let* ((source (or (agent-shell-dashboard--unfork-source)
+                     (user-error "Not in an agent-shell session")))
+         (relatives (or (agent-shell-dashboard--fork-relatives source)
+                        (user-error "%s has no live fork relatives" (buffer-name source))))
+         (target (agent-shell-dashboard--pick-unfork-target relatives))
+         (file (agent-shell-dashboard--unfork-file source))
+         (since (agent-shell-dashboard--first-prompt
+                 (agent-shell-dashboard--transcript source))))
+    (make-directory (file-name-directory file) t)
+    (when (file-exists-p file) (delete-file file))
+    (agent-shell-dashboard--submit
+     source
+     (concat
+      (format "We are folding this session back into %s, which shares everything that happened before this session was forked off. "
+              (buffer-name target))
+      (format "Write to %s an account of only what happened after the fork" file)
+      (if since (format ", starting from my message that began %S" since) "")
+      ". Cover what was decided, what changed (files, commits, branches, PRs), what was learned, and what is still open. Do not restate anything from before the fork; the other session already has it. Plain markdown, as short as it can be while still letting the other session pick up this work. Reply only with \"written\" when the file is saved."))
+    (agent-shell-dashboard--unfork-wait
+     source target file close
+     (time-add nil agent-shell-dashboard-unfork-timeout))
+    (message "Asked %s to write up its fork; will hand it to %s when done"
+             (buffer-name source) (buffer-name target))))
 
 (defun agent-shell-dashboard ()
   "Open the agent-shell dashboard, taking over the current frame.
