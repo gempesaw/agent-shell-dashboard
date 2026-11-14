@@ -82,6 +82,9 @@
     background-size: 50% 100%; background-repeat: no-repeat; }
   #progress.on { opacity: 1; animation: sweep 1s linear infinite; }
   @keyframes sweep { from { background-position: -50% 0; } to { background-position: 150% 0; } }
+  .refresh { position: relative; }
+  .refresh.update::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px;
+    border-radius: 50%; background: #ffb8d1; }
   #auth { display: none; padding: 40px; max-width: 640px; }
   #auth input { width: 100%; margin: 10px 0; }
 
@@ -111,6 +114,7 @@
   <div class="bar">
     <span id="counts" class="shadow">Agent Shell</span>
     <span class="grow"></span>
+    <button class="refresh" onclick="refresh()" title="refresh">↻</button>
     <button onclick="toggleNewMenu()">+ new</button>
     <label class="shadow"><input type="checkbox" id="show-closed"> closed</label>
     <input id="search" placeholder="search (literal, space-separated)" autocomplete="off">
@@ -125,6 +129,7 @@
     <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
+    <button class="refresh" onclick="refresh()" title="refresh">↻</button>
     <button id="stop" onclick="interrupt()">cancel</button>
   </div>
   <div id="summary" class="shadow"></div>
@@ -142,6 +147,27 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const PAGE_VERSION = "__PAGE_VERSION__";
+let updateAvailable = false;
+
+function noteVersion(d) {
+  updateAvailable = !!d?.page && d.page !== PAGE_VERSION;
+  document.querySelectorAll(".refresh").forEach((b) => {
+    b.classList.toggle("update", updateAvailable);
+    b.title = updateAvailable ? "a newer version of this page is available: reload" : "refresh";
+  });
+}
+
+async function refresh() {
+  if (updateAvailable) return location.reload();
+  if (current?.buffer) {
+    sessionCache.delete(current.buffer);
+    tick = null;
+    await withProgress(Promise.all([loadSession(), loadTabs(true)])).catch(console.error);
+  } else {
+    await withProgress(loadDashboard(true)).catch(console.error);
+  }
+}
 let token = localStorage.getItem("asd-token");
 let data = null;
 let current = null;       // {buffer, session_id}
@@ -284,8 +310,9 @@ function renderDashboard() {
     .map((g) => columnHtml(g, showClosed)).join("");
 }
 
-async function loadDashboard() {
-  data = await api("/api/sessions");
+async function loadDashboard(force) {
+  data = await api("/api/sessions", force ? { force: true } : {});
+  noteVersion(data);
   renderDashboard();
 }
 
@@ -314,8 +341,9 @@ function renderTabs() {
   $("tabs").querySelector(".active")?.scrollIntoView({ inline: "nearest", block: "nearest" });
 }
 
-async function loadTabs() {
-  data = await api("/api/sessions");
+async function loadTabs(force) {
+  data = await api("/api/sessions", force ? { force: true } : {});
+  noteVersion(data);
   renderTabs();
 }
 

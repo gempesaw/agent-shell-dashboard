@@ -106,6 +106,10 @@ Emacs on machines that do not have it installed."
 
 ;;;; Serialization
 
+(defun agent-shell-dashboard-web--page-version ()
+  (format "%d" (float-time (file-attribute-modification-time
+                            (file-attributes agent-shell-dashboard-web--page)))))
+
 (defun agent-shell-dashboard-web--hex (color)
   (if-let* ((rgb (and (stringp color) (color-name-to-rgb color))))
       (apply #'color-rgb-to-hex (append rgb '(2)))
@@ -210,6 +214,7 @@ would stall Emacs for every poll; live rows are cheap and stay fresh."
                        :shadow (agent-shell-dashboard-web--color 'shadow :foreground)
                        :header (agent-shell-dashboard-web--color 'font-lock-function-name-face
                                                                  :foreground))
+          :page (agent-shell-dashboard-web--page-version)
           :live (length live)
           :closed (length closed)
           :pinned (vconcat (mapcar #'car pinned))
@@ -507,9 +512,10 @@ projectile's list — so the page cannot start an agent anywhere else."
    ((and (equal method "GET") (member path '("/" "/index.html")))
     (agent-shell-dashboard-web--respond
      process 200 "text/html; charset=utf-8"
-     (with-temp-buffer
-       (insert-file-contents agent-shell-dashboard-web--page)
-       (buffer-string))))
+     (string-replace "__PAGE_VERSION__" (agent-shell-dashboard-web--page-version)
+                     (with-temp-buffer
+                       (insert-file-contents agent-shell-dashboard-web--page)
+                       (buffer-string)))))
 
    ((not (string-prefix-p "/api/" path))
     (agent-shell-dashboard-web--json process 404 '(:error "not found")))
@@ -524,7 +530,11 @@ projectile's list — so the page cannot start an agent anywhere else."
       (agent-shell-dashboard-web--json
        process 200
        (pcase path
-         ("/api/sessions" (agent-shell-dashboard-web--sessions-json))
+         ("/api/sessions"
+          (when (plist-get args :force)
+            (agent-shell-dashboard-web--refresh-closed)
+            (setq agent-shell-dashboard-web--snapshot nil))
+          (agent-shell-dashboard-web--sessions-json))
          ("/api/session"
           (agent-shell-dashboard-web--session
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
