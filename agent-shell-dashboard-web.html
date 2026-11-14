@@ -193,6 +193,7 @@ async function refresh() {
 }
 let token = localStorage.getItem("asd-token");
 let data = null;
+try { data = JSON.parse(localStorage.getItem("asd-dashboard")); } catch (e) {}
 let current = null;       // {buffer, session_id}
 let tick = null;
 let timer = null;
@@ -334,9 +335,11 @@ function renderDashboard() {
 }
 
 async function loadDashboard(force) {
-  data = await api("/api/sessions", force ? { force: true } : {});
-  noteVersion(data);
-  renderDashboard();
+  const fresh = await api("/api/sessions", force ? { force: true } : {});
+  noteVersion(fresh);
+  data = fresh;
+  if (!current) renderDashboard();
+  try { localStorage.setItem("asd-dashboard", JSON.stringify(fresh)); } catch (e) {}
 }
 
 function tabLabel(r) {
@@ -644,7 +647,8 @@ function route() {
     document.body.classList.remove("in-session");
     $("session").style.display = "none";
     $("dashboard").style.display = "block";
-    loadDashboard().catch(console.error);
+    if (data) renderDashboard();
+    withProgress(loadDashboard()).catch(console.error);
     timer = setInterval(() => { if (!document.hidden) loadDashboard().catch(console.error); }, 3000);
   }
 }
