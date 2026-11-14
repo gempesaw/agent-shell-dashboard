@@ -602,8 +602,13 @@ document.addEventListener("click", (e) => {
   else go("c/" + encodeURIComponent(row.dataset.session));
 });
 $("prompt").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst) { e.preventDefault(); send(); }
 });
+const touchFirst = matchMedia("(hover: none) and (pointer: coarse)").matches;
+if (touchFirst) {
+  $("prompt").placeholder = "Message";
+  $("prompt").setAttribute("enterkeyhint", "enter");
+}
 $("search").addEventListener("input", renderDashboard);
 $("new-filter").addEventListener("input", renderNewList);
 $("new-filter").addEventListener("keydown", (e) => {
