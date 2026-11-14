@@ -199,7 +199,31 @@ so it stops rather than polling forever."
             (setq agent-shell-dashboard--summary-pending t)
             (agent-shell-dashboard--check-for-summary-capture)
             (unless agent-shell-dashboard--buffer-summary
-              (setq agent-shell-dashboard--summary-pending nil))))))))))
+              (setq agent-shell-dashboard--summary-pending nil)
+              (setq agent-shell-dashboard--buffer-summary
+                    (agent-shell-dashboard--archived-summary session-id)))))))))))
+
+(defun agent-shell-dashboard--archived-summary (session-id)
+  (let ((known (agent-shell-dashboard--all-known-summaries))
+        (lineage (agent-shell-dashboard--fork-lineage))
+        (seen nil)
+        found)
+    (while (and session-id (not found) (not (member session-id seen)))
+      (push session-id seen)
+      (setq found (ht-get known session-id)
+            session-id (cdr (assoc session-id lineage))))
+    found))
+
+(defvar-local agent-shell-dashboard--summary-backfilled nil)
+
+(defun agent-shell-dashboard--ensure-summary (buffer)
+  (with-current-buffer buffer
+    (unless (or agent-shell-dashboard--buffer-summary
+                agent-shell-dashboard--summary-backfilled)
+      (setq agent-shell-dashboard--summary-backfilled t)
+      (when-let* ((sid (map-nested-elt agent-shell--state '(:session :id))))
+        (run-with-idle-timer 1 nil #'agent-shell-dashboard--backfill-summary-from-buffer
+                             sid 12)))))
 
 (defun agent-shell-dashboard--backfill-on-init-finished (&rest args)
   "Re-parse a resumed session's summary once its init finishes.

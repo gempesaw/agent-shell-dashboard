@@ -17,6 +17,8 @@
 (require 'subr-x)
 (require 'agent-shell)
 
+(declare-function agent-shell-dashboard--ensure-summary "agent-shell-dashboard-tracking")
+
 (defgroup agent-shell-dashboard nil
   "Magit-style dashboard for agent-shell sessions."
   :group 'agent-shell)
@@ -530,6 +532,7 @@ reading the first JSONL found there."
   "Build a dashboard row plist from live agent-shell BUF, or nil."
   (with-current-buffer buf
     (when-let* ((id (map-nested-elt agent-shell--state '(:session :id))))
+      (agent-shell-dashboard--ensure-summary buf)
       (let* ((raw-status (agent-shell-dashboard--buffer-status buf))
              (last-time agent-shell-dashboard--buffer-last-prompt-time)
              (marked-read agent-shell-dashboard--buffer-marked-read-time)
