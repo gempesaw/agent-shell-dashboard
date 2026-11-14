@@ -22,9 +22,9 @@
 
   #board { display: flex; gap: 14px; padding: 12px 14px; align-items: flex-start; }
   #pinned { display: flex; gap: 14px; flex: 0 0 auto; }
-  #rest { flex: 1; display: grid; gap: 18px 14px;
-    grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); }
-  .col { width: 560px; max-width: 100%; }
+  #rest { flex: 1; min-width: 0; display: grid; gap: 18px 14px;
+    grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr)); }
+  .col { width: 560px; max-width: 100%; min-width: 0; }
   #rest .col { width: auto; }
   .col h2 { margin: 0 0 6px; font-size: 18px; color: var(--header); }
   .col h2 .shadow { font-size: 12px; font-weight: normal; }
@@ -92,7 +92,7 @@
     #board { flex-direction: column; }
     #pinned { flex-direction: column; width: 100%; }
     .col, #rest { width: 100%; }
-    #rest { grid-template-columns: 1fr; }
+    #rest { grid-template-columns: minmax(0, 1fr); }
     #search { width: 100%; }
     .wide { display: none; }
     #prompt { font-size: 16px; }
