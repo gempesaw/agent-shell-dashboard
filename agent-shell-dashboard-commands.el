@@ -183,7 +183,9 @@ query either appears in a row or does not match it."
                             (agent-shell-dashboard--collapse-whitespace
                              (plist-get row :last-prompt-text))
                             agent-shell-dashboard-search-preview-limit))
-                  (label (s-trim (format "%s | %s | %s"
+                  (time (agent-shell-dashboard--row-time row))
+                  (label (s-trim (format "%-12s %s | %s | %s"
+                                         (if time (format-time-string "%b %d %H:%M" time) "")
                                          project summary preview))))
              (cons label it))
            agent-shell-dashboard--row-positions))
