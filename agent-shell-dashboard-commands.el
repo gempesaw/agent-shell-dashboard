@@ -46,6 +46,7 @@
     (define-key map (kbd "u")   #'agent-shell-dashboard-unmark)
     (define-key map (kbd "U")   #'agent-shell-dashboard-unmark-all)
     (define-key map (kbd "w")   #'agent-shell-dashboard-show-marked)
+    (define-key map (kbd "c")   #'agent-shell-dashboard-toggle-closed)
     map)
   "Keymap for `agent-shell-dashboard-mode'.")
 

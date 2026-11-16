@@ -453,6 +453,17 @@ in left-to-right order: pinned first, then right-side band-by-band."
                         :first-row-pos (cdr entry))
                   agent-shell-dashboard--columns)))))))
 
+(defcustom agent-shell-dashboard-show-closed nil
+  "Whether the dashboard lists closed sessions."
+  :type 'boolean
+  :group 'agent-shell-dashboard)
+
+(defun agent-shell-dashboard-toggle-closed ()
+  (interactive)
+  (setq agent-shell-dashboard-show-closed (not agent-shell-dashboard-show-closed))
+  (agent-shell-dashboard-refresh)
+  (message "Closed sessions %s" (if agent-shell-dashboard-show-closed "shown" "hidden")))
+
 (defun agent-shell-dashboard-refresh ()
   "Re-render the dashboard contents, preserving the row at point.
 Projects are laid out as side-by-side columns; if more projects
@@ -467,6 +478,7 @@ exist than fit horizontally, extra projects wrap to a second band."
                   (agent-shell-dashboard--compute-fork-index rows)))
          (live (--filter (plist-get it :buffer) rows))
          (closed (--remove (plist-get it :buffer) rows))
+         (rows (if agent-shell-dashboard-show-closed rows live))
          (groups (agent-shell-dashboard--group-rows rows))
          (width agent-shell-dashboard-column-width)
          (gap agent-shell-dashboard-column-gap)
@@ -483,8 +495,10 @@ exist than fit horizontally, extra projects wrap to a second band."
     (setq agent-shell-dashboard--row-positions nil)
     (setq agent-shell-dashboard--columns nil)
     (insert (propertize
-             (format "Agent Shell  —  %d live, %d closed across %d project%s\n\n"
-                     (length live) (length closed) (length groups)
+             (format "Agent Shell  —  %d live, %d closed%s across %d project%s\n\n"
+                     (length live) (length closed)
+                     (if agent-shell-dashboard-show-closed "" " (hidden, c to show)")
+                     (length groups)
                      (if (= 1 (length groups)) "" "s"))
              'face 'shadow))
     (cond
