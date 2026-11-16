@@ -655,14 +655,18 @@ get their own column; beyond that, columns start stacking rows."
         (agent-shell--busy-submit :prompt prompt)
       (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t))))
 
-(defun agent-shell-dashboard--unfork-deliver (source target file close)
+(defun agent-shell-dashboard--unfork-deliver (source target file close &optional unrelated)
   (let ((transcript (agent-shell-dashboard--transcript source)))
     (agent-shell-dashboard--submit
      target
      (concat
-      (format "Merging back a fork. %s was forked from this conversation and went on to do work you have not seen."
-              (buffer-name source))
-      (format "\n\nIts account of everything since the fork is at:\n  %s" file)
+      (if unrelated
+          (format "Merging in another session. %s was a separate conversation you have never seen; its work now continues here."
+                  (buffer-name source))
+        (format "Merging back a fork. %s was forked from this conversation and went on to do work you have not seen."
+                (buffer-name source)))
+      (format "\n\nIts account of %s is at:\n  %s"
+              (if unrelated "that session" "everything since the fork") file)
       (when transcript
         (format "\n\nThe full record of that work, if the account is not enough:\n  %s" transcript))
       "\n\nRead the account, then tell me in a few lines what changed and what you are carrying forward."))
@@ -671,22 +675,22 @@ get their own column; beyond that, columns start stacking rows."
                                            :session-id (agent-shell-dashboard--session-id source)))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer source)))
-    (message "Unforked %s into %s" (if close "and closed the fork" (buffer-name source))
+    (message "Merged %s into %s" (if close "and closed it" (buffer-name source))
              (buffer-name target))))
 
-(defun agent-shell-dashboard--unfork-wait (source target file close deadline)
+(defun agent-shell-dashboard--unfork-wait (source target file close deadline &optional unrelated)
   (cond
    ((not (and (buffer-live-p source) (buffer-live-p target)))
-    (message "Unfork abandoned: a session went away"))
+    (message "Merge abandoned: a session went away"))
    ((and (file-exists-p file)
          (> (file-attribute-size (file-attributes file)) 0)
          (not (with-current-buffer source (shell-maker-busy))))
-    (agent-shell-dashboard--unfork-deliver source target file close))
+    (agent-shell-dashboard--unfork-deliver source target file close unrelated))
    ((time-less-p deadline nil)
-    (message "Unfork gave up waiting for %s" file))
+    (message "Merge gave up waiting for %s" file))
    (t
     (run-at-time 3 nil #'agent-shell-dashboard--unfork-wait
-                 source target file close deadline))))
+                 source target file close deadline unrelated))))
 
 (defun agent-shell-dashboard-unfork (&optional close)
   (interactive "P")
@@ -698,24 +702,68 @@ get their own column; beyond that, columns start stacking rows."
     (agent-shell-dashboard--unfork-into source target close)))
 
 (defun agent-shell-dashboard--unfork-into (source target close)
-  (let* ((file (agent-shell-dashboard--unfork-file source))
-         (since (agent-shell-dashboard--first-prompt
-                 (agent-shell-dashboard--transcript source))))
+  (let* ((unrelated (not (memq target (agent-shell-dashboard--fork-relatives source))))
+         (file (agent-shell-dashboard--unfork-file source))
+         (since (and (not unrelated)
+                     (agent-shell-dashboard--first-prompt
+                      (agent-shell-dashboard--transcript source)))))
     (make-directory (file-name-directory file) t)
     (when (file-exists-p file) (delete-file file))
     (agent-shell-dashboard--submit
      source
      (concat
-      (format "We are folding this session back into %s, which shares everything that happened before this session was forked off. "
-              (buffer-name target))
-      (format "Write to %s an account of only what happened after the fork" file)
-      (if since (format ", starting from my message that began %S" since) "")
-      ". Cover what was decided, what changed (files, commits, branches, PRs), what was learned, and what is still open. Do not restate anything from before the fork; the other session already has it. Plain markdown, as short as it can be while still letting the other session pick up this work. Reply only with \"written\" when the file is saved."))
+      (if unrelated
+          (concat
+           (format "We are merging this session into %s, which knows nothing about it. "
+                   (buffer-name target))
+           (format "Write to %s an account of this session: what it set out to do" file))
+        (concat
+         (format "We are folding this session back into %s, which shares everything that happened before this session was forked off. "
+                 (buffer-name target))
+         (format "Write to %s an account of only what happened after the fork" file)
+         (if since (format ", starting from my message that began %S" since) "")))
+      ". Cover what was decided, what changed (files, commits, branches, PRs), what was learned, and what is still open."
+      (unless unrelated
+        " Do not restate anything from before the fork; the other session already has it.")
+      " Plain markdown, as short as it can be while still letting the other session pick up this work. Reply only with \"written\" when the file is saved."))
     (agent-shell-dashboard--unfork-wait
      source target file close
-     (time-add nil agent-shell-dashboard-unfork-timeout))
-    (message "Asked %s to write up its fork; will hand it to %s when done"
+     (time-add nil agent-shell-dashboard-unfork-timeout)
+     unrelated)
+    (message "Asked %s to write itself up; will hand it to %s when done"
              (buffer-name source) (buffer-name target))))
+
+(defun agent-shell-dashboard--pick-merge-target (source)
+  (let* ((relatives (agent-shell-dashboard--fork-relatives source))
+         (others (--remove (or (eq it source) (memq it relatives))
+                           (agent-shell-dashboard--all-buffers)))
+         (label (lambda (buffer tag)
+                  (format "%s%s  %s" (buffer-name buffer) tag
+                          (or (agent-shell-dashboard--collapse-whitespace
+                               (buffer-local-value 'agent-shell-dashboard--buffer-summary buffer))
+                              ""))))
+         (choices (append (--map-indexed (cons (funcall label it (if (zerop it-index)
+                                                                      " (fork, oldest)"
+                                                                    " (fork)"))
+                                               it)
+                                         relatives)
+                          (--map (cons (funcall label it "") it) others)))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      '(metadata (display-sort-function . identity))
+                    (complete-with-action action (mapcar #'car choices) string pred)))))
+    (unless choices
+      (user-error "No other live session to merge into"))
+    (cdr (assoc (completing-read (format "Merge %s into: " (buffer-name source))
+                                 table nil t nil nil (and relatives (caar choices)))
+                choices))))
+
+(defun agent-shell-dashboard-merge (&optional keep)
+  (interactive "P")
+  (let ((source (or (agent-shell-dashboard--unfork-source)
+                    (user-error "Not in an agent-shell session"))))
+    (agent-shell-dashboard--unfork-into
+     source (agent-shell-dashboard--pick-merge-target source) (not keep))))
 
 (defun agent-shell-dashboard ()
   "Open the agent-shell dashboard, taking over the current frame.
