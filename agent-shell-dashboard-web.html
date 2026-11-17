@@ -149,8 +149,7 @@
     <button id="unfork" onclick="toggleUnforkMenu()" style="display:none">unfork</button>
     <button id="stop" onclick="interrupt()">cancel</button>
     <div id="unfork-menu">
-      <label><input type="checkbox" id="unfork-close"> close this fork once delivered</label>
-      <div class="shadow" style="cursor:default">fold this fork's work into:</div>
+      <div class="shadow" style="cursor:default">fold into (this fork is then deleted):</div>
       <div id="unfork-list"></div>
     </div>
   </div>
@@ -557,7 +556,6 @@ async function checkUnfork() {
 function toggleUnforkMenu() {
   const menu = $("unfork-menu");
   if (menu.style.display === "block") { menu.style.display = "none"; return; }
-  $("unfork-close").checked = false;
   $("unfork-list").innerHTML = unforkTargets.map((t, i) =>
     `<div data-unfork="${esc(t.buffer)}">${esc(t.buffer)}${i === 0 ? " (oldest)" : ""} <span class="shadow">${esc(t.summary)}</span></div>`).join("");
   menu.style.display = "block";
@@ -565,9 +563,8 @@ function toggleUnforkMenu() {
 
 async function unfork(target) {
   $("unfork-menu").style.display = "none";
-  const close = $("unfork-close").checked;
   try {
-    await withProgress(api("/api/unfork", { buffer: current.buffer, target, close }));
+    await withProgress(api("/api/unfork", { buffer: current.buffer, target }));
     tick = null;
     loadSession().catch(console.error);
   } catch (e) { alert("Unfork failed: " + e.message); }

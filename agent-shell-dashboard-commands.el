@@ -379,16 +379,23 @@ to the tombstone so JSONL enumeration won't resurface the row."
                    label))
       ;; Before the kill, so the mark is matched by buffer and this
       ;; fork's siblings keep theirs.
-      (agent-shell-dashboard--unmark row)
-      (when (and buf (buffer-live-p buf))
-        (let ((windows (get-buffer-window-list buf nil nil)))
-          (kill-buffer buf)
-          (dolist (w windows)
-            (when (window-live-p w)
-              (ignore-errors (delete-window w))))))
-      (agent-shell-dashboard--forget-session session-id)
+      (agent-shell-dashboard--hard-kill row)
       (agent-shell-dashboard-refresh)
       (agent-shell-dashboard--goto-row-by-id neighbor-id))))
+
+(defun agent-shell-dashboard--hard-kill (row)
+  (let ((buf (plist-get row :buffer))
+        (session-id (plist-get row :session-id)))
+    (agent-shell-dashboard--unmark row)
+    (when (and buf (buffer-live-p buf))
+      (let ((windows (get-buffer-window-list buf nil t))
+            (kill-buffer-query-functions nil))
+        (kill-buffer buf)
+        (dolist (w windows)
+          (when (window-live-p w)
+            (ignore-errors (delete-window w))))))
+    (when session-id
+      (agent-shell-dashboard--forget-session session-id))))
 
 (defun agent-shell-dashboard-quit ()
   "Bury the dashboard and restore the saved window configuration."
@@ -674,10 +681,11 @@ get their own column; beyond that, columns start stacking rows."
         (format "\n\nThe full record of that work, if the account is not enough:\n  %s" transcript))
       "\n\nRead the account, then tell me in a few lines what changed and what you are carrying forward."))
     (when close
-      (agent-shell-dashboard--unmark (list :buffer source
-                                           :session-id (agent-shell-dashboard--session-id source)))
-      (let ((kill-buffer-query-functions nil))
-        (kill-buffer source)))
+      (agent-shell-dashboard--hard-kill
+       (list :buffer source :session-id (agent-shell-dashboard--session-id source)))
+      (when-let* ((dashboard (get-buffer agent-shell-dashboard-buffer-name)))
+        (with-current-buffer dashboard
+          (agent-shell-dashboard-refresh))))
     (message "Merged %s into %s" (if close "and closed it" (buffer-name source))
              (buffer-name target))))
 
@@ -695,14 +703,14 @@ get their own column; beyond that, columns start stacking rows."
     (run-at-time 3 nil #'agent-shell-dashboard--unfork-wait
                  source target file close deadline unrelated))))
 
-(defun agent-shell-dashboard-unfork (&optional close)
+(defun agent-shell-dashboard-unfork (&optional keep)
   (interactive "P")
   (let* ((source (or (agent-shell-dashboard--unfork-source)
                      (user-error "Not in an agent-shell session")))
          (relatives (or (agent-shell-dashboard--fork-relatives source)
                         (user-error "%s has no live fork relatives" (buffer-name source))))
          (target (agent-shell-dashboard--pick-unfork-target relatives)))
-    (agent-shell-dashboard--unfork-into source target close)))
+    (agent-shell-dashboard--unfork-into source target (not keep))))
 
 (defun agent-shell-dashboard--unfork-into (source target close)
   (let* ((unrelated (not (memq target (agent-shell-dashboard--fork-relatives source))))

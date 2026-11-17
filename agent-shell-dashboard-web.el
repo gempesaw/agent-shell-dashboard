@@ -562,7 +562,7 @@ projectile's list — so the page cannot start an agent anywhere else."
           (agent-shell-dashboard--unfork-into
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
            (agent-shell-dashboard-web--session-buffer (plist-get args :target))
-           (eq (plist-get args :close) t))
+           t)
           '(:ok t))
          ("/api/section"
           (agent-shell-dashboard-web--section
