@@ -57,6 +57,20 @@
   #new-menu div { padding: 4px 8px; border-radius: 4px; cursor: pointer; }
   #new-menu div:hover { background: rgba(255,255,255,.12); }
 
+  .snip-run { font: inherit; font-size: .85em; margin: 0 0 4px; padding: 1px 8px; cursor: pointer;
+    color: inherit; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.25); border-radius: 4px; }
+  .snip-run:hover { background: rgba(255,255,255,.18); }
+  #console-dialog { display: none; position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.45); }
+  #console-dialog .box { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(760px, calc(100% - 24px)); max-height: calc(100% - 24px); display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg); border: 1px solid rgba(255,255,255,.25); border-radius: 8px; padding: 12px; }
+  #console-command { font: inherit; width: 100%; min-height: 3.5em; resize: vertical; box-sizing: border-box;
+    color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.2); border-radius: 4px; padding: 6px; }
+  #console-output { margin: 0; flex: 1 1 auto; min-height: 8em; max-height: 45vh; overflow: auto; white-space: pre-wrap;
+    background: rgba(0,0,0,.25); border-radius: 4px; padding: 6px; font-size: .9em; }
+  #console-dialog .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #console-dialog .row .grow { flex: 1 1 auto; }
+
   #session { display: none; flex-direction: column; height: 100vh; height: 100dvh; }
   body.in-session { overflow: hidden; }
   #session > * { min-width: 0; }
@@ -471,12 +485,13 @@ function paint() {
   const emitted = new Set();
   const name = (i) => (i >= 0 ? shown.sections[i] : "");
   const collapsedInEmacs = new Map();
+  const buttoned = new Set();
   for (const [, , hidden, i, role] of shown.runs)
     if (i >= 0 && role === "b") collapsedInEmacs.set(name(i), !!hidden);
   const open = (sec) => toggled.has(sec) ? toggled.get(sec) : !collapsedInEmacs.get(sec);
 
   $("text").innerHTML = (shown.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
-    shown.runs.map(([text, style, hidden, i, role, url]) => {
+    shown.runs.map(([text, style, hidden, i, role, url, snip]) => {
       const sec = name(i);
       if (sec && collapsedInEmacs.has(sec)) {
         if (role === "b") {
@@ -491,14 +506,21 @@ function paint() {
         if (role === "i") text = text.replace(/^[▶▼]/, open(sec) ? "▼" : "▶");
       }
       if (hidden && !text) return "";
+      let button = "";
+      if (snip >= 0 && !hidden && !buttoned.has(snip)) {
+        buttoned.add(snip);
+        button = `<button class="snip-run" data-snip="${snip}">▶ run</button>\n`;
+      }
       const attrs = (hidden ? ' class="inv"' : "") + (css[style] ? ` style="${css[style]}"` : "") +
         (sec && (role === "i" || role === "l") ? ` data-s="${esc(sec)}" data-r="${role}"` : "") +
         (sec && role === "b" ? ` data-b="${esc(sec)}"` : "");
-      return `<span${attrs}>${linkify(text, url)}</span>`;
+      return button + `<span${attrs}>${linkify(text, url)}</span>`;
     }).join("");
 }
 
 $("text").addEventListener("click", (e) => {
+  const run = e.target.closest(".snip-run");
+  if (run) { openSnippet(Number(run.dataset.snip)); return; }
   if (e.target.closest("a")) return;
   const head = e.target.closest("[data-s]");
   if (!head || getSelection().toString()) return;
@@ -510,6 +532,88 @@ $("text").addEventListener("click", (e) => {
   if (!isOpen && body && !body[0] && !bodies.has(sec)) loadBody(sec);
   paint();
 });
+
+let consoleQueue = [], consoleIndex = 0, consoleBuffer = null, consolePoll = null, consoleBusy = false;
+
+function snippetText(n) {
+  return shown.runs.filter((r) => r[6] === n && !r[2]).map((r) => r[0]).join("");
+}
+
+async function openSnippet(n) {
+  consoleBuffer = current?.buffer;
+  if (!consoleBuffer) return;
+  const r = await api("/api/snippet-commands", { text: snippetText(n) }).catch((e) => alert(e.message));
+  if (!r || !r.commands.length) return;
+  consoleQueue = r.commands;
+  consoleIndex = 0;
+  $("console-dialog").style.display = "block";
+  consoleShow();
+  consoleRefresh();
+  clearInterval(consolePoll);
+  consolePoll = setInterval(consoleRefresh, 1000);
+}
+
+function consoleShow() {
+  const done = consoleIndex >= consoleQueue.length;
+  $("console-progress").textContent = done
+    ? "all done"
+    : `command ${consoleIndex + 1} of ${consoleQueue.length}`;
+  $("console-command").value = done ? "" : consoleQueue[consoleIndex];
+  $("console-command").disabled = done;
+  $("console-run").disabled = done;
+}
+
+async function consoleRefresh() {
+  if (!consoleBuffer) return;
+  const r = await api("/api/console", { buffer: consoleBuffer }).catch(() => null);
+  if (!r) return;
+  const out = $("console-output");
+  const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 4;
+  out.textContent = r.text;
+  if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+async function consoleSend(command) {
+  await api("/api/console-run", { buffer: consoleBuffer, command });
+  setTimeout(consoleRefresh, 400);
+}
+
+async function consoleRun() {
+  if (consoleBusy || consoleIndex >= consoleQueue.length) return;
+  consoleBusy = true;
+  try {
+    await consoleSend($("console-command").value);
+    consoleIndex++;
+    consoleShow();
+  } catch (e) { alert("Run failed: " + e.message); }
+  finally { consoleBusy = false; }
+}
+
+function consoleSkip() {
+  if (consoleIndex < consoleQueue.length) { consoleIndex++; consoleShow(); }
+}
+
+async function consoleRunAll() {
+  if (consoleBusy) return;
+  consoleBusy = true;
+  try {
+    let first = true;
+    while (consoleIndex < consoleQueue.length) {
+      await consoleSend(first ? $("console-command").value : consoleQueue[consoleIndex]);
+      first = false;
+      consoleIndex++;
+      consoleShow();
+    }
+  } catch (e) { alert("Run failed: " + e.message); }
+  finally { consoleBusy = false; }
+}
+
+function consoleClose() {
+  $("console-dialog").style.display = "none";
+  clearInterval(consolePoll);
+  consolePoll = null;
+  consoleBuffer = null;
+}
 
 let sending = false;
 
@@ -811,5 +915,17 @@ function switchTab(step) {
 if (!token) $("auth").style.display = "block", $("dashboard").style.display = "none";
 else { loadFont(); route(); }
 </script>
+<div id="console-dialog">
+  <div class="box">
+    <div class="row"><span class="grow" id="console-progress"></span><button onclick="consoleClose()">close</button></div>
+    <textarea id="console-command" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="console-run" onclick="consoleRun()">run</button>
+      <button onclick="consoleSkip()">skip</button>
+      <button onclick="consoleRunAll()">run all</button>
+    </div>
+    <pre id="console-output"></pre>
+  </div>
+</div>
 </body>
 </html>

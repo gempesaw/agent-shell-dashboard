@@ -273,6 +273,28 @@ would stall Emacs for every poll; live rows are cheap and stay fresh."
           :bold (if bold t :false) :italic (if italic t :false)
           :underline (if underline t :false))))
 
+(defcustom agent-shell-dashboard-web-shell-languages
+  '("bash" "sh" "shell" "zsh" "console" "shellsession")
+  "Code block languages the page offers to run in a console."
+  :type '(repeat string)
+  :group 'agent-shell-dashboard)
+
+(defvar agent-shell-dashboard-web-console-run-function nil
+  "Function of (SESSION-BUFFER COMMAND) running COMMAND in a console.
+Nil leaves code blocks without a run button.")
+
+(defvar agent-shell-dashboard-web-console-split-function nil
+  "Function splitting a snippet's text into a list of commands.")
+
+(defvar agent-shell-dashboard-web-console-text-function nil
+  "Function of (SESSION-BUFFER) returning the console's recent output.")
+
+(defun agent-shell-dashboard-web--block-language (body-start)
+  (let ((start (or (previous-single-property-change
+                    body-start 'agent-shell-markdown-source-block-rendered)
+                   (point-min))))
+    (car (split-string (buffer-substring-no-properties start body-start)))))
+
 (defun agent-shell-dashboard-web--runs (start end &optional reveal)
   "Runs between START and END, as (RUNS STYLES SECTIONS).
 Each run is [TEXT STYLE HIDDEN SECTION ROLE URL], SECTION an index into
@@ -285,6 +307,8 @@ the page knows it exists and can fetch it when opened."
         (sections nil)
         (section-index (make-hash-table :test 'equal))
         runs
+        (snippets (make-hash-table))
+        (snippet-count 0)
         (pos start))
     (while (< pos end)
       (let* ((next (min end (next-char-property-change pos end)))
@@ -296,6 +320,20 @@ the page knows it exists and can fetch it when opened."
                      ('body "b")
                      (_ "")))
              (hidden (and (not reveal) (invisible-p pos)))
+             (snippet
+              (if (and agent-shell-dashboard-web-console-run-function
+                       (get-text-property pos 'agent-shell-markdown-source-block-body))
+                  (let ((body-start (or (previous-single-property-change
+                                         (1+ pos) 'agent-shell-markdown-source-block-body)
+                                        (point-min))))
+                    (or (gethash body-start snippets)
+                        (puthash body-start
+                                 (if (member (agent-shell-dashboard-web--block-language body-start)
+                                             agent-shell-dashboard-web-shell-languages)
+                                     (prog1 snippet-count (cl-incf snippet-count))
+                                   -1)
+                                 snippets)))
+                -1))
              (section (if id
                           (or (gethash id section-index)
                               (progn (push id sections)
@@ -319,7 +357,8 @@ the page knows it exists and can fetch it when opened."
                           style (if hidden 1 0) section code
                           (let ((url (or (get-text-property pos 'agent-shell-markdown-url)
                                          (get-text-property pos 'browse-url-data))))
-                            (if (and (not hidden) (stringp url)) url "")))
+                            (if (and (not hidden) (stringp url)) url ""))
+                          snippet)
                   runs))))
         (setq pos next)))
     (list (vconcat (nreverse runs)) (vconcat styles) (vconcat (nreverse sections)))))
@@ -548,6 +587,25 @@ projectile's list — so the page cannot start an agent anywhere else."
                               (list :name (or (map-elt cmd 'name) "")
                                     :description (or (map-elt cmd 'description) "")))
                             (map-elt agent-shell--state :available-commands))))))
+         ("/api/snippet-commands"
+          (let ((text (or (plist-get args :text) "")))
+            (list :commands
+                  (vconcat (if agent-shell-dashboard-web-console-split-function
+                               (funcall agent-shell-dashboard-web-console-split-function text)
+                             (list text))))))
+         ("/api/console-run"
+          (unless agent-shell-dashboard-web-console-run-function
+            (signal 'user-error (list "No console configured")))
+          (funcall agent-shell-dashboard-web-console-run-function
+                   (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
+                   (plist-get args :command))
+          (list :ok t))
+         ("/api/console"
+          (list :text
+                (if agent-shell-dashboard-web-console-text-function
+                    (funcall agent-shell-dashboard-web-console-text-function
+                             (agent-shell-dashboard-web--session-buffer (plist-get args :buffer)))
+                  "")))
          ("/api/unfork-targets"
           (let ((source (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))))
             (list :targets
