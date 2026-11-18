@@ -638,6 +638,16 @@ projectile's list — so the page cannot start an agent anywhere else."
           (agent-shell-dashboard-web--send
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
            (plist-get args :prompt)))
+         ("/api/fork"
+          (let ((source (agent-shell-dashboard-web--session-buffer (plist-get args :buffer)))
+                (before (agent-shell-dashboard--all-buffers)))
+            (unless (agent-shell-dashboard--fork-capable-p source)
+              (signal 'user-error (list "This session's agent cannot fork")))
+            (with-current-buffer source
+              (save-window-excursion (agent-shell-fork)))
+            (setq agent-shell-dashboard-web--snapshot nil)
+            (let ((fork (car (seq-difference (agent-shell-dashboard--all-buffers) before))))
+              (list :buffer (if (buffer-live-p fork) (buffer-name fork) :null)))))
          ("/api/interrupt"
           (with-current-buffer (agent-shell-dashboard-web--session-buffer
                                 (plist-get args :buffer))

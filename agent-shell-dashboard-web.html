@@ -171,6 +171,7 @@
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
     <button class="refresh" onclick="refresh()" title="refresh">↻</button>
+    <button id="fork" onclick="fork()">fork</button>
     <button id="unfork" onclick="toggleUnforkMenu()" style="display:none">unfork</button>
     <button id="stop" onclick="interrupt()">cancel</button>
     <div id="unfork-menu">
@@ -408,12 +409,14 @@ async function loadSession() {
     $("closed").style.display = "block";
     $("compose").style.display = "none";
     $("stop").style.display = "none";
+    $("fork").style.display = "none";
     $("state").textContent = "closed";
     return;
   }
   $("closed").style.display = "none";
   $("compose").style.display = "flex";
   $("stop").style.display = "";
+  $("fork").style.display = "";
   const buffer = current.buffer;
   const s = await api("/api/session", { buffer, tick });
   if (current?.buffer !== buffer) return;
@@ -716,6 +719,14 @@ async function toggleNewMenu() {
   projects = (await api("/api/projects")).projects;
   renderNewList();
   $("new-filter").focus();
+}
+
+async function fork() {
+  if (!current?.buffer) return;
+  try {
+    const r = await withProgress(api("/api/fork", { buffer: current.buffer }));
+    if (r.buffer) go("s/" + encodeURIComponent(r.buffer));
+  } catch (e) { alert("Fork failed: " + e.message); }
 }
 
 async function resume() {
