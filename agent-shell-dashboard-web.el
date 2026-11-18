@@ -307,8 +307,9 @@ the page knows it exists and can fetch it when opened."
         (sections nil)
         (section-index (make-hash-table :test 'equal))
         runs
-        (snippets (make-hash-table))
         (snippet-count 0)
+        (snippet-end start)
+        (snippet -1)
         (pos start))
     (while (< pos end)
       (let* ((next (min end (next-char-property-change pos end)))
@@ -321,19 +322,26 @@ the page knows it exists and can fetch it when opened."
                      (_ "")))
              (hidden (and (not reveal) (invisible-p pos)))
              (snippet
-              (if (and agent-shell-dashboard-web-console-run-function
-                       (get-text-property pos 'agent-shell-markdown-source-block-body))
-                  (let ((body-start (or (previous-single-property-change
-                                         (1+ pos) 'agent-shell-markdown-source-block-body)
-                                        (point-min))))
-                    (or (gethash body-start snippets)
-                        (puthash body-start
-                                 (if (member (agent-shell-dashboard-web--block-language body-start)
-                                             agent-shell-dashboard-web-shell-languages)
-                                     (prog1 snippet-count (cl-incf snippet-count))
-                                   -1)
-                                 snippets)))
-                -1))
+              (cond
+               ((not (and agent-shell-dashboard-web-console-run-function
+                          (get-text-property pos 'agent-shell-markdown-source-block-body)))
+                -1)
+               ((< pos snippet-end) snippet)
+               (t
+                (let ((body-start (if (and (> pos (point-min))
+                                           (get-text-property
+                                            (1- pos) 'agent-shell-markdown-source-block-body))
+                                      (or (previous-single-property-change
+                                           pos 'agent-shell-markdown-source-block-body)
+                                          (point-min))
+                                    pos)))
+                  (setq snippet-end (or (next-single-property-change
+                                         pos 'agent-shell-markdown-source-block-body nil end)
+                                        end)
+                        snippet (if (member (agent-shell-dashboard-web--block-language body-start)
+                                            agent-shell-dashboard-web-shell-languages)
+                                    (prog1 snippet-count (cl-incf snippet-count))
+                                  -1))))))
              (section (if id
                           (or (gethash id section-index)
                               (progn (push id sections)
