@@ -573,9 +573,20 @@ async function consoleRefresh() {
   if (atBottom) out.scrollTop = out.scrollHeight;
 }
 
+let consoleBurstUntil = 0;
+
+function consoleBurst() {
+  consoleBurstUntil = Date.now() + 4000;
+  const step = () => {
+    if (!consoleBuffer || Date.now() > consoleBurstUntil) return;
+    consoleRefresh().finally(() => setTimeout(step, 150));
+  };
+  step();
+}
+
 async function consoleSend(command) {
   await api("/api/console-run", { buffer: consoleBuffer, command });
-  setTimeout(consoleRefresh, 400);
+  consoleBurst();
 }
 
 async function consoleRun() {
