@@ -42,8 +42,11 @@
   #new-menu { display: none; position: absolute; right: 14px; top: 44px; z-index: 5;
     max-height: 60vh; overflow: auto; min-width: 260px; background: var(--bg);
     border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
-  #session .bar { position: relative; }
-  #unfork-menu { display: none; position: absolute; right: 14px; top: 100%; z-index: 5;
+  #session .bar { position: relative; border-bottom: none; border-top: 1px solid rgba(255,255,255,.12); }
+  #last-prompt { padding: 6px 14px; border-bottom: 1px solid rgba(255,255,255,.12);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #last-prompt:empty { display: none; }
+  #unfork-menu { display: none; position: absolute; right: 14px; bottom: 100%; z-index: 5;
     max-height: 60vh; overflow: auto; width: min(520px, calc(100% - 28px)); background: var(--bg);
     border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
   #unfork-menu label { display: block; padding: 4px 8px; }
@@ -141,6 +144,14 @@
 
 <div id="session">
   <div id="tabs"></div>
+  <div id="last-prompt"></div>
+  <div id="summary" class="shadow"></div>
+  <pre id="text"></pre>
+  <div id="closed" style="display:none">
+    <p class="shadow">This session is closed.</p>
+    <button onclick="resume()">Resume it in Emacs</button>
+  </div>
+  <div id="queued" class="shadow"></div>
   <div class="bar">
     <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
@@ -153,13 +164,6 @@
       <div id="unfork-list"></div>
     </div>
   </div>
-  <div id="summary" class="shadow"></div>
-  <pre id="text"></pre>
-  <div id="closed" style="display:none">
-    <p class="shadow">This session is closed.</p>
-    <button onclick="resume()">Resume it in Emacs</button>
-  </div>
-  <div id="queued" class="shadow"></div>
   <div id="compose">
     <div id="slash"></div>
     <textarea id="prompt" placeholder="Message (Enter to send, Shift+Enter for a newline)"></textarea>
@@ -385,6 +389,7 @@ async function loadSession() {
     const row = findRow(null, current.session_id);
     $("session-name").textContent = current.session_id;
     $("summary").textContent = row?.summary || "";
+    $("last-prompt").textContent = row?.preview ? "> " + row.preview : "";
     $("text").textContent = "";
     $("closed").style.display = "block";
     $("compose").style.display = "none";
@@ -408,6 +413,8 @@ async function loadSession() {
   shown = s;
   paint();
   if (s.summary) $("summary").textContent = s.summary.split("\n")[0];
+  const preview = findRow(current.buffer, current.session_id)?.preview;
+  $("last-prompt").textContent = preview ? "> " + preview : "";
   if (atBottom) pre.scrollTop = pre.scrollHeight;
   tick = s.tick;
 }
