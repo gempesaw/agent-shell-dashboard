@@ -286,6 +286,9 @@ Nil leaves code blocks without a run button.")
 (defvar agent-shell-dashboard-web-console-split-function nil
   "Function splitting a snippet's text into a list of commands.")
 
+(defvar agent-shell-dashboard-web-console-open-function nil
+  "Function of (SESSION-BUFFER) starting its console ahead of the first run.")
+
 (defvar agent-shell-dashboard-web-console-text-function nil
   "Function of (SESSION-BUFFER) returning the console's recent output.")
 
@@ -609,6 +612,9 @@ projectile's list — so the page cannot start an agent anywhere else."
                    (plist-get args :command))
           (list :ok t))
          ("/api/console"
+          (when (and (plist-get args :open) agent-shell-dashboard-web-console-open-function)
+            (funcall agent-shell-dashboard-web-console-open-function
+                     (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))))
           (list :text
                 (if agent-shell-dashboard-web-console-text-function
                     (funcall agent-shell-dashboard-web-console-text-function

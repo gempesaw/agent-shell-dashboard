@@ -68,8 +68,8 @@
     color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.2); border-radius: 4px; padding: 6px; }
   #console-output { margin: 0; flex: 1 1 auto; min-height: 8em; max-height: 45vh; overflow: auto; white-space: pre-wrap;
     background: rgba(0,0,0,.25); border-radius: 4px; padding: 6px; font-size: .9em; }
-  #console-dialog .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  #console-dialog .row .grow { flex: 1 1 auto; }
+  #console-dialog .crow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #console-dialog .crow .grow { flex: 1 1 auto; }
 
   #session { display: none; flex-direction: column; height: 100vh; height: 100dvh; }
   body.in-session { overflow: hidden; }
@@ -542,18 +542,37 @@ function snippetText(n) {
   return shown.runs.filter((r) => r[6] === n && !r[2]).map((r) => r[0]).join("");
 }
 
+function consoleStatus(text) { $("console-status").textContent = text || ""; }
+
+function consoleButtons(enabled) {
+  for (const id of ["console-run", "console-skip", "console-all"]) $(id).disabled = !enabled;
+}
+
 async function openSnippet(n) {
   consoleBuffer = current?.buffer;
   if (!consoleBuffer) return;
-  const r = await api("/api/snippet-commands", { text: snippetText(n) }).catch((e) => alert(e.message));
-  if (!r || !r.commands.length) return;
-  consoleQueue = r.commands;
+  consoleQueue = [];
   consoleIndex = 0;
+  consoleLastText = null;
+  $("console-progress").textContent = "loading snippet…";
+  $("console-command").value = snippetText(n).trim();
+  $("console-command").disabled = true;
+  $("console-output").textContent = "";
+  consoleButtons(false);
+  consoleStatus("starting console…");
   $("console-dialog").style.display = "block";
-  consoleShow();
-  consoleRefresh();
+
+  api("/api/console", { buffer: consoleBuffer, open: true })
+    .then((r) => { if (consoleBuffer) { $("console-output").textContent = r.text; consoleStatus(""); } })
+    .catch((e) => consoleStatus("console: " + e.message));
   clearInterval(consolePoll);
   consolePoll = setInterval(consoleRefresh, 1000);
+
+  const r = await api("/api/snippet-commands", { text: snippetText(n) })
+    .catch((e) => { consoleStatus(e.message); return null; });
+  if (!r || !consoleBuffer) return;
+  consoleQueue = r.commands;
+  consoleShow();
 }
 
 function consoleShow() {
@@ -563,8 +582,10 @@ function consoleShow() {
     : `command ${consoleIndex + 1} of ${consoleQueue.length}`;
   $("console-command").value = done ? "" : consoleQueue[consoleIndex];
   $("console-command").disabled = done;
-  $("console-run").disabled = done;
+  consoleButtons(!done && !consoleBusy);
 }
+
+let consoleLastText = null, consoleWaiting = false;
 
 async function consoleRefresh() {
   if (!consoleBuffer) return;
@@ -572,6 +593,11 @@ async function consoleRefresh() {
   if (!r) return;
   const out = $("console-output");
   const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 4;
+  if (consoleWaiting && consoleLastText !== null && r.text !== consoleLastText) {
+    consoleWaiting = false;
+    consoleStatus("");
+  }
+  consoleLastText = r.text;
   out.textContent = r.text;
   if (atBottom) out.scrollTop = out.scrollHeight;
 }
@@ -588,19 +614,22 @@ function consoleBurst() {
 }
 
 async function consoleSend(command) {
+  consoleStatus("sending…");
   await api("/api/console-run", { buffer: consoleBuffer, command });
+  consoleWaiting = true;
+  consoleStatus("sent — waiting for output…");
   consoleBurst();
 }
 
 async function consoleRun() {
   if (consoleBusy || consoleIndex >= consoleQueue.length) return;
   consoleBusy = true;
+  consoleButtons(false);
   try {
     await consoleSend($("console-command").value);
     consoleIndex++;
-    consoleShow();
-  } catch (e) { alert("Run failed: " + e.message); }
-  finally { consoleBusy = false; }
+  } catch (e) { consoleStatus("run failed: " + e.message); }
+  finally { consoleBusy = false; consoleShow(); }
 }
 
 function consoleSkip() {
@@ -610,6 +639,7 @@ function consoleSkip() {
 async function consoleRunAll() {
   if (consoleBusy) return;
   consoleBusy = true;
+  consoleButtons(false);
   try {
     let first = true;
     while (consoleIndex < consoleQueue.length) {
@@ -618,8 +648,8 @@ async function consoleRunAll() {
       consoleIndex++;
       consoleShow();
     }
-  } catch (e) { alert("Run failed: " + e.message); }
-  finally { consoleBusy = false; }
+  } catch (e) { consoleStatus("run failed: " + e.message); }
+  finally { consoleBusy = false; consoleShow(); }
 }
 
 function consoleClose() {
@@ -939,12 +969,13 @@ else { loadFont(); route(); }
 </script>
 <div id="console-dialog">
   <div class="box">
-    <div class="row"><span class="grow" id="console-progress"></span><button onclick="consoleClose()">close</button></div>
+    <div class="crow"><span class="grow" id="console-progress"></span><button onclick="consoleClose()">close</button></div>
     <textarea id="console-command" spellcheck="false"></textarea>
-    <div class="row">
+    <div class="crow">
       <button id="console-run" onclick="consoleRun()">run</button>
-      <button onclick="consoleSkip()">skip</button>
-      <button onclick="consoleRunAll()">run all</button>
+      <button id="console-skip" onclick="consoleSkip()">skip</button>
+      <button id="console-all" onclick="consoleRunAll()">run all</button>
+      <span class="grow shadow" id="console-status"></span>
     </div>
     <pre id="console-output"></pre>
   </div>
