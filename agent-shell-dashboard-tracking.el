@@ -100,6 +100,8 @@ request is actually submitted — until then it may sit in the
 pending queue behind a busy request and there is nothing to poll."
   (when (and (derived-mode-p 'agent-shell-mode)
              (not agent-shell-dashboard--summary-pending)
+             (not (agent-shell-dashboard--manual-summary
+                   (map-nested-elt agent-shell--state '(:session :id))))
              (or (= agent-shell-dashboard--prompt-count 1)
                  (= 0 (mod agent-shell-dashboard--prompt-count agent-shell-dashboard-summary-interval))))
     (let ((buf (current-buffer)))
@@ -189,6 +191,9 @@ so it stops rather than polling forever."
         (with-current-buffer buf
           (cond
            (agent-shell-dashboard--buffer-summary)   ; already have one
+           ((agent-shell-dashboard--manual-summary session-id)
+            (setq agent-shell-dashboard--buffer-summary
+                  (agent-shell-dashboard--manual-summary session-id)))
            ((shell-maker-busy)                       ; replay still streaming
             (run-with-timer 3 nil #'agent-shell-dashboard--backfill-summary-from-buffer
                             session-id (1- attempts)))
@@ -296,8 +301,17 @@ EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
                    (lambda ()
                      (agent-shell-dashboard-save-active-sessions dying-buffer))))))
 
-(defun agent-shell-dashboard--archive-summary (session-id summary &optional cwd)
-  "Upsert SESSION-ID's SUMMARY in the archive, optionally with CWD context."
+(defun agent-shell-dashboard--manual-summary (session-id)
+  "Return SESSION-ID's archived summary if the user set it by hand."
+  (when session-id
+    (when-let* ((entry (--find (equal (plist-get it :session-id) session-id)
+                               (agent-shell-dashboard--read-summary-archive)))
+                ((plist-get entry :manual)))
+      (plist-get entry :summary))))
+
+(defun agent-shell-dashboard--archive-summary (session-id summary &optional cwd manual)
+  "Upsert SESSION-ID's SUMMARY in the archive, optionally with CWD context.
+MANUAL marks a summary the user wrote, which automatic capture leaves alone."
   (when (and session-id summary (not (s-blank? summary)))
     (let* ((existing (or (agent-shell-dashboard--read-summary-archive) '()))
            (without (--remove (equal (plist-get it :session-id) session-id)
@@ -308,7 +322,8 @@ EXCLUDE-BUFFER, when non-nil, is omitted (e.g. a buffer being killed)."
                         :summary summary
                         :project (or project "")
                         :cwd (or cwd "")
-                        :updated-at (format-time-string "%FT%T%z"))))
+                        :updated-at (format-time-string "%FT%T%z")
+                        :manual manual)))
       (agent-shell-dashboard--write-summary-archive (cons entry without)))))
 
 (defun agent-shell-dashboard--all-known-summaries ()

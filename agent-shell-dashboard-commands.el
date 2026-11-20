@@ -14,6 +14,9 @@
 
 (declare-function agent-shell--busy-submit "agent-shell-prompt-queue")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
+(defvar agent-shell-dashboard--summary-pending)
+(declare-function agent-shell-dashboard--archive-summary "agent-shell-dashboard-tracking")
+(declare-function agent-shell-dashboard-save-active-sessions "agent-shell-dashboard-tracking")
 
 (defvar agent-shell-dashboard-buffer-name "*agent-shell-dashboard*"
   "Name of the agent-shell dashboard buffer.")
@@ -30,6 +33,8 @@
     (define-key map (kbd "RET") #'agent-shell-dashboard-visit)
     (define-key map (kbd "o")   #'agent-shell-dashboard-visit-other-window)
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
+    (define-key map (kbd "F")   #'agent-shell-dashboard-fork-detached)
+    (define-key map (kbd "e")   #'agent-shell-dashboard-set-summary)
     (define-key map (kbd "k")   #'agent-shell-dashboard-stop)
     (define-key map (kbd "K")   #'agent-shell-dashboard-forget)
     ;; `m' marks for the layout.  `mark-as-read' keeps its command but
@@ -293,6 +298,77 @@ session to fork, and for agents without fork support."
           (message "Resumed %s; session shares the original's id"
                    (buffer-name new)))
         (agent-shell-dashboard-refresh)))))
+
+(defun agent-shell-dashboard--command-target ()
+  "Return the agent-shell buffer or dashboard row a command acts on.
+The current buffer when it is an agent-shell, else the row at point."
+  (if (derived-mode-p 'agent-shell-mode)
+      (list :buffer (current-buffer)
+            :session-id (map-nested-elt agent-shell--state '(:session :id))
+            :cwd default-directory
+            :summary agent-shell-dashboard--buffer-summary)
+    (agent-shell-dashboard--row-at-point)))
+
+(defun agent-shell-dashboard--refresh-dashboard ()
+  (when-let* ((dashboard (get-buffer agent-shell-dashboard-buffer-name)))
+    (with-current-buffer dashboard
+      (agent-shell-dashboard-refresh))))
+
+(defun agent-shell-dashboard-fork-buffer-detached (buffer)
+  "Fork BUFFER's session into a new shell that keeps no link back to it.
+The fork starts with the same conversation under its own session id
+and transcript, and is never recorded in the fork lineage, so it gets
+no fork badge, inherits no summary, and is not offered to unfork."
+  (unless (agent-shell-dashboard--fork-capable-p buffer)
+    (user-error "This session's agent cannot fork"))
+  (let ((before (agent-shell-dashboard--all-buffers)))
+    (with-current-buffer buffer (agent-shell-fork))
+    (let ((fork (car (seq-difference (agent-shell-dashboard--all-buffers) before))))
+      (when (buffer-live-p fork)
+        (with-current-buffer fork
+          (setq agent-shell-dashboard--detached t)))
+      fork)))
+
+(defun agent-shell-dashboard-fork-detached ()
+  "Fork the session into one with no link back to it.
+See `agent-shell-dashboard-fork-buffer-detached'."
+  (interactive)
+  (agent-shell-dashboard-fork-buffer-detached
+   (plist-get (agent-shell-dashboard--command-target) :buffer))
+  (run-with-idle-timer 1 nil #'agent-shell-dashboard--refresh-dashboard))
+
+(defun agent-shell-dashboard-set-summary (summary)
+  "Replace the session's summary with SUMMARY.
+Automatic summarizing leaves a hand-set summary alone until the
+session is explicitly re-summarized."
+  (interactive
+   (list (read-string "Summary: "
+                      (when-let* ((current (plist-get (agent-shell-dashboard--command-target)
+                                                      :summary)))
+                        (agent-shell-dashboard--collapse-whitespace
+                         (agent-shell-dashboard--clean-summary current))))))
+  (when (s-blank? summary)
+    (user-error "Summary is empty"))
+
+  (let* ((target (agent-shell-dashboard--command-target))
+         (sid (or (plist-get target :session-id)
+                  (user-error "Session has no id yet")))
+         (buffer (or (plist-get target :buffer)
+                     (agent-shell-dashboard--find-live-buffer-for-session sid))))
+    (agent-shell-dashboard--archive-summary
+     sid summary
+     (if (buffer-live-p buffer)
+         (buffer-local-value 'default-directory buffer)
+       (plist-get target :cwd))
+     t)
+
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq agent-shell-dashboard--summary-pending nil
+              agent-shell-dashboard--buffer-summary summary))
+      (agent-shell-dashboard-save-active-sessions))
+
+    (agent-shell-dashboard--refresh-dashboard)))
 
 (defun agent-shell-dashboard-mark-as-read ()
   "Acknowledge the row's awaiting state, clearing the gold tint.

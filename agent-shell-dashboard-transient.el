@@ -24,6 +24,8 @@
     ("o"   "open in other window" agent-shell-dashboard-visit-other-window)
     ("s"   "send (viewport)"     agent-shell-dashboard-send)
     ("f"   "fork"                agent-shell-dashboard-fork)
+    ("F"   "fork, unlinked"      agent-shell-dashboard-fork-detached)
+    ("e"   "set summary"         agent-shell-dashboard-set-summary)
     ("r"   "reload"              agent-shell-dashboard-reload)
     ("k"   "stop (live only)"    agent-shell-dashboard-stop)
     ("K"   "forget permanently"  agent-shell-dashboard-forget)

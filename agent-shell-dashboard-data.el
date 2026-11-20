@@ -420,6 +420,10 @@ Returns non-nil when the row ended up marked."
 
 ;;; Fork lineage
 
+(defvar-local agent-shell-dashboard--detached nil
+  "Non-nil in a fork that should never be recorded as its parent's child.")
+(put 'agent-shell-dashboard--detached 'permanent-local t)
+
 (defvar agent-shell-dashboard--fork-lineage 'unloaded)
 
 (defun agent-shell-dashboard--fork-lineage ()
@@ -445,6 +449,8 @@ buffer is."
                               (parent (map-elt state :fork-session-id))
                               (child (map-nested-elt state '(:session :id))))
                          (and parent child (not (equal parent child))
+                              (not (buffer-local-value
+                                    'agent-shell-dashboard--detached buf))
                               (not (assoc child lineage))
                               (cons child parent))))
                      (agent-shell-dashboard--all-buffers)))))
