@@ -7,14 +7,9 @@
 ;; Serves the dashboard over HTTP from inside Emacs, so another machine
 ;; on the network can browse sessions, read a session's buffer and send
 ;; it prompts.  `agent-shell-dashboard-web-start' starts the server and
-;; puts its URL on the kill ring; open that URL once per browser and the
-;; page remembers the token it carries.
-;;
-;; The token matters: prompts sent from the page run with the session's
-;; permissions, so anyone who can reach the port without it would be
-;; running commands on this machine.  It travels in the URL fragment,
-;; which browsers do not send to the server, and the page then sends it
-;; in an Authorization header with every request.
+;; puts its URL on the kill ring.  There is no authentication: anyone who
+;; can reach the port can send prompts that run with the session's
+;; permissions.
 
 ;;; Code:
 
@@ -43,12 +38,6 @@ local."
   :type 'string
   :group 'agent-shell-dashboard)
 
-(defcustom agent-shell-dashboard-web-token-file
-  (expand-file-name "agent-shell-dashboard-web-token" user-emacs-directory)
-  "File holding the token the web dashboard requires."
-  :type 'file
-  :group 'agent-shell-dashboard)
-
 (defcustom agent-shell-dashboard-web-buffer-limit 400000
   "Characters from the end of a session buffer sent to the browser."
   :type 'integer
@@ -63,7 +52,6 @@ Emacs on machines that do not have it installed."
   :group 'agent-shell-dashboard)
 
 (defvar agent-shell-dashboard-web--server nil)
-(defvar agent-shell-dashboard-web--token nil)
 (defvar agent-shell-dashboard-web--snapshot nil)
 (defvar agent-shell-dashboard-web--closed nil
   "Closed rows and their serialized form: (TIME LIVE-IDS ROWS . SERIALIZED).")
@@ -75,31 +63,14 @@ Emacs on machines that do not have it installed."
   (expand-file-name "agent-shell-dashboard-web.html"
                     (file-name-directory (or load-file-name buffer-file-name))))
 
-(defun agent-shell-dashboard-web--token ()
-  (or agent-shell-dashboard-web--token
-      (setq agent-shell-dashboard-web--token
-            (if (file-exists-p agent-shell-dashboard-web-token-file)
-                (string-trim (with-temp-buffer
-                               (insert-file-contents agent-shell-dashboard-web-token-file)
-                               (buffer-string)))
-              (let ((token (with-temp-buffer
-                             (set-buffer-multibyte nil)
-                             (call-process "head" nil t nil "-c" "24" "/dev/urandom")
-                             (base64url-encode-string (buffer-string) t))))
-                (with-temp-file agent-shell-dashboard-web-token-file
-                  (insert token))
-                (set-file-modes agent-shell-dashboard-web-token-file #o600)
-                token)))))
-
 (defun agent-shell-dashboard-web-url ()
-  "Put the web dashboard's URL, token included, on the kill ring."
+  "Put the web dashboard's URL on the kill ring."
   (interactive)
-  (let ((url (format "http://%s:%d/#%s"
+  (let ((url (format "http://%s:%d/"
                      (concat (string-trim
                               (shell-command-to-string "scutil --get LocalHostName"))
                              ".local")
-                     agent-shell-dashboard-web-port
-                     (agent-shell-dashboard-web--token))))
+                     agent-shell-dashboard-web-port)))
     (kill-new url)
     (message "%s (copied)" url)
     url))
@@ -485,16 +456,15 @@ projectile's list — so the page cannot start an agent anywhere else."
                                      ".*\\.\\(otf\\|ttf\\|woff2?\\)\\'"))))
      agent-shell-dashboard-web-font-directories)))
 
-(defun agent-shell-dashboard-web--font-css (token)
+(defun agent-shell-dashboard-web--font-css ()
   (let ((family (agent-shell-dashboard-web--font-family)))
     (concat
      (mapconcat
       (lambda (file)
         (let ((name (file-name-base file)))
-          (format "@font-face { font-family: %S; src: url(\"/font/%s?token=%s\"); font-weight: %d; font-style: %s; }\n"
+          (format "@font-face { font-family: %S; src: url(\"/font/%s\"); font-weight: %d; font-style: %s; }\n"
                   family
                   (url-hexify-string (file-name-nondirectory file))
-                  (url-hexify-string token)
                   (cond ((string-match-p "ExtraBold\\|Black\\|Heavy" name) 800)
                         ((string-match-p "SemiBold\\|DemiBold" name) 600)
                         ((string-match-p "Bold" name) 700)
@@ -531,33 +501,25 @@ projectile's list — so the page cannot start an agent anywhere else."
    process status "application/json"
    (if (stringp object) object (json-serialize object))))
 
-(defun agent-shell-dashboard-web--authorized-p (headers)
-  (let ((given (cdr (assoc "authorization" headers))))
-    (and given
-         (string= given (concat "Bearer " (agent-shell-dashboard-web--token))))))
-
 (defun agent-shell-dashboard-web--dispatch (process method path query headers body)
   (cond
    ((and (equal method "GET") (string-prefix-p "/font" path))
-    (if (not (equal (car (alist-get "token" query nil nil #'equal))
-                    (agent-shell-dashboard-web--token)))
-        (agent-shell-dashboard-web--json process 401 '(:error "unauthorized"))
-      (if (equal path "/font.css")
+    (if (equal path "/font.css")
+        (agent-shell-dashboard-web--respond
+         process 200 "text/css; charset=utf-8"
+         (agent-shell-dashboard-web--font-css) t)
+      (if-let* ((file (agent-shell-dashboard-web--font-file
+                       (url-unhex-string (string-remove-prefix "/font/" path)))))
           (agent-shell-dashboard-web--respond
-           process 200 "text/css; charset=utf-8"
-           (agent-shell-dashboard-web--font-css (agent-shell-dashboard-web--token)) t)
-        (if-let* ((file (agent-shell-dashboard-web--font-file
-                         (url-unhex-string (string-remove-prefix "/font/" path)))))
-            (agent-shell-dashboard-web--respond
-             process 200
-             (pcase (file-name-extension file)
-               ("otf" "font/otf") ("ttf" "font/ttf") ("woff" "font/woff") (_ "font/woff2"))
-             (with-temp-buffer
-               (set-buffer-multibyte nil)
-               (insert-file-contents-literally file)
-               (buffer-string))
-             t)
-          (agent-shell-dashboard-web--json process 404 '(:error "no such font"))))))
+           process 200
+           (pcase (file-name-extension file)
+             ("otf" "font/otf") ("ttf" "font/ttf") ("woff" "font/woff") (_ "font/woff2"))
+           (with-temp-buffer
+             (set-buffer-multibyte nil)
+             (insert-file-contents-literally file)
+             (buffer-string))
+           t)
+        (agent-shell-dashboard-web--json process 404 '(:error "no such font")))))
 
    ((and (equal method "GET") (member path '("/" "/index.html")))
     (agent-shell-dashboard-web--respond
@@ -569,9 +531,6 @@ projectile's list — so the page cannot start an agent anywhere else."
 
    ((not (string-prefix-p "/api/" path))
     (agent-shell-dashboard-web--json process 404 '(:error "not found")))
-
-   ((not (agent-shell-dashboard-web--authorized-p headers))
-    (agent-shell-dashboard-web--json process 401 '(:error "unauthorized")))
 
    (t
     (let ((args (if (s-blank? body)

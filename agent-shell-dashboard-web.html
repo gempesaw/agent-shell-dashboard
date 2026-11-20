@@ -118,8 +118,6 @@
   .refresh { position: relative; }
   .refresh.update::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px;
     border-radius: 50%; background: #ffb8d1; }
-  #auth { display: none; padding: 40px; max-width: 640px; }
-  #auth input { width: 100%; margin: 10px 0; }
 
   @media (max-width: 900px) {
     #board { flex-direction: column; }
@@ -135,13 +133,6 @@
 <body>
 
 <div id="progress"></div>
-<div id="auth">
-  <h2>Token needed</h2>
-  <p class="shadow">Run <code>M-x agent-shell-dashboard-web-url</code> in Emacs and open
-    the copied URL, or paste it (or just the token) here.</p>
-  <input id="token-input" placeholder="http://…/#token">
-  <button onclick="saveToken()">Use token</button>
-</div>
 
 <div id="dashboard">
   <div class="bar">
@@ -209,35 +200,22 @@ async function refresh() {
     await withProgress(loadDashboard(true)).catch(console.error);
   }
 }
-let token = localStorage.getItem("asd-token");
 let data = null;
 try { data = JSON.parse(localStorage.getItem("asd-dashboard")); } catch (e) {}
 let current = null;       // {buffer, session_id}
 let tick = null;
 let timer = null;
 
-if (location.hash && !location.hash.startsWith("#/")) {
-  token = decodeURIComponent(location.hash.slice(1));
-  localStorage.setItem("asd-token", token);
-  history.replaceState(null, "", location.pathname);
-}
+localStorage.removeItem("asd-token");
+if (location.hash && !location.hash.startsWith("#/")) history.replaceState(null, "", location.pathname);
 
 function loadFont() {
-  if (!token || document.getElementById("emacs-font")) return;
+  if (document.getElementById("emacs-font")) return;
   const link = document.createElement("link");
   link.id = "emacs-font";
   link.rel = "stylesheet";
-  link.href = "/font.css?token=" + encodeURIComponent(token);
+  link.href = "/font.css";
   document.head.appendChild(link);
-}
-
-function saveToken() {
-  const v = $("token-input").value.trim();
-  token = v.includes("#") ? v.slice(v.indexOf("#") + 1) : v;
-  localStorage.setItem("asd-token", token);
-  $("auth").style.display = "none";
-  loadFont();
-  route();
 }
 
 let pending = 0, progressTimer = null;
@@ -274,15 +252,9 @@ async function prefetchNeighbors() {
 async function api(path, body) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
-  if (res.status === 401) {
-    $("dashboard").style.display = "none";
-    $("session").style.display = "none";
-    $("auth").style.display = "block";
-    throw new Error("unauthorized");
-  }
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || res.statusText);
   return json;
@@ -964,8 +936,8 @@ function switchTab(step) {
   pane.addEventListener("touchend", end);
   pane.addEventListener("touchcancel", end);
 })();
-if (!token) $("auth").style.display = "block", $("dashboard").style.display = "none";
-else { loadFont(); route(); }
+loadFont();
+route();
 </script>
 <div id="console-dialog">
   <div class="box">
