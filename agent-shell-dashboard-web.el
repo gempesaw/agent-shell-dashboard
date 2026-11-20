@@ -115,8 +115,9 @@ Emacs on machines that do not have it installed."
           :session_id (or (plist-get row :session-id) :null)
           :live (if live t :false)
           :status (symbol-name (or (plist-get row :status) 'unknown))
-          :ago (or (agent-shell-dashboard--format-relative-time time)
-                   (if (eq (plist-get row :status) 'closed) "closed" "—"))
+          :ago (cond (time :null)
+                     ((eq (plist-get row :status) 'closed) "closed")
+                     (t "—"))
           :time (if time (float-time time) 0)
           :summary (agent-shell-dashboard--collapse-whitespace
                     (agent-shell-dashboard--clean-summary (plist-get row :summary)))
@@ -201,14 +202,62 @@ would stall Emacs for every poll; live rows are cheap and stay fresh."
                                                   (cdr group)))))
                            (append pinned (--remove (memq it pinned) groups)))))))
 
-(defun agent-shell-dashboard-web--sessions-json ()
+(defun agent-shell-dashboard-web--sessions-json (etag)
   (setq agent-shell-dashboard-web--last-request (current-time))
   (let ((cached agent-shell-dashboard-web--snapshot))
-    (if (and cached (< (float-time (time-subtract nil (car cached))) 2))
-        (cdr cached)
-      (cdr (setq agent-shell-dashboard-web--snapshot
-                 (cons (current-time)
-                       (json-serialize (agent-shell-dashboard-web--sessions))))))))
+    (unless (and cached (< (float-time (time-subtract nil (car cached))) 2))
+      (let* ((json (json-serialize (agent-shell-dashboard-web--sessions)))
+             (hash (secure-hash 'md5 json)))
+        (setq cached (list (current-time) hash
+                           (concat "{\"etag\":\"" hash "\"," (substring json 1)))
+              agent-shell-dashboard-web--snapshot cached)))
+    (if (equal etag (nth 1 cached))
+        (list :unchanged t :etag etag)
+      (nth 2 cached))))
+
+(defvar agent-shell-dashboard-web--waiters nil)
+(defvar agent-shell-dashboard-web--waiter-timer nil)
+
+(defconst agent-shell-dashboard-web-long-poll-seconds 25)
+
+(defun agent-shell-dashboard-web--session-state (buffer)
+  (with-current-buffer buffer
+    (list (buffer-modified-tick)
+          (and (shell-maker-busy) t)
+          (length (map-elt agent-shell--state :pending-prompts)))))
+
+(defun agent-shell-dashboard-web--wait-for-change (process buffer args)
+  (push (list process buffer
+              (list (plist-get args :tick) (eq (plist-get args :busy) t) (plist-get args :queued))
+              (time-add nil agent-shell-dashboard-web-long-poll-seconds))
+        agent-shell-dashboard-web--waiters)
+  (unless agent-shell-dashboard-web--waiter-timer
+    (setq agent-shell-dashboard-web--waiter-timer
+          (run-at-time 0.3 0.3 #'agent-shell-dashboard-web--check-waiters))))
+
+(defun agent-shell-dashboard-web--check-waiters ()
+  (setq agent-shell-dashboard-web--waiters
+        (seq-filter
+         (pcase-lambda (`(,process ,buffer ,known ,deadline))
+           (cond
+            ((not (process-live-p process)) nil)
+            ((not (buffer-live-p buffer))
+             (agent-shell-dashboard-web--json process 200 '(:gone t))
+             nil)
+            ((or (time-less-p deadline nil)
+                 (not (equal known (agent-shell-dashboard-web--session-state buffer))))
+             (condition-case err
+                 (agent-shell-dashboard-web--json
+                  process 200 (agent-shell-dashboard-web--session buffer (car known)))
+               (error (agent-shell-dashboard-web--json
+                       process 500 (list :error (error-message-string err)))))
+             nil)
+            (t t)))
+         agent-shell-dashboard-web--waiters))
+  (when (and (null agent-shell-dashboard-web--waiters)
+             agent-shell-dashboard-web--waiter-timer)
+    (cancel-timer agent-shell-dashboard-web--waiter-timer)
+    (setq agent-shell-dashboard-web--waiter-timer nil)))
 
 (defun agent-shell-dashboard-web--session-buffer (name)
   (let ((buffer (and (stringp name) (get-buffer name))))
@@ -535,7 +584,16 @@ projectile's list — so the page cannot start an agent anywhere else."
    (t
     (let ((args (if (s-blank? body)
                     nil
-                  (json-parse-string body :object-type 'plist :null-object nil))))
+                  (json-parse-string body :object-type 'plist :null-object nil)))
+          (buffer nil))
+      (if (and (equal path "/api/session")
+               (eq (plist-get args :wait) t)
+               (setq buffer (agent-shell-dashboard-web--session-buffer (plist-get args :buffer)))
+               (equal (agent-shell-dashboard-web--session-state buffer)
+                      (list (plist-get args :tick)
+                            (eq (plist-get args :busy) t)
+                            (plist-get args :queued))))
+          (agent-shell-dashboard-web--wait-for-change process buffer args)
       (agent-shell-dashboard-web--json
        process 200
        (pcase path
@@ -543,7 +601,8 @@ projectile's list — so the page cannot start an agent anywhere else."
           (when (plist-get args :force)
             (agent-shell-dashboard-web--refresh-closed)
             (setq agent-shell-dashboard-web--snapshot nil))
-          (agent-shell-dashboard-web--sessions-json))
+          (agent-shell-dashboard-web--sessions-json
+           (and (not (plist-get args :force)) (plist-get args :etag))))
          ("/api/session"
           (agent-shell-dashboard-web--session
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
@@ -624,7 +683,7 @@ projectile's list — so the page cannot start an agent anywhere else."
           (agent-shell-dashboard-web--new-session (plist-get args :dir)))
          ("/api/resume"
           (agent-shell-dashboard-web--resume (plist-get args :session_id)))
-         (_ (signal 'user-error (list (format "Unknown endpoint %s" path))))))))))
+         (_ (signal 'user-error (list (format "Unknown endpoint %s" path)))))))))))
 
 (defun agent-shell-dashboard-web--handle (process request)
   (condition-case err
@@ -692,6 +751,10 @@ projectile's list — so the page cannot start an agent anywhere else."
   (when agent-shell-dashboard-web--maintenance
     (cancel-timer agent-shell-dashboard-web--maintenance)
     (setq agent-shell-dashboard-web--maintenance nil))
+  (when agent-shell-dashboard-web--waiter-timer
+    (cancel-timer agent-shell-dashboard-web--waiter-timer)
+    (setq agent-shell-dashboard-web--waiter-timer nil))
+  (setq agent-shell-dashboard-web--waiters nil)
   (setq agent-shell-dashboard-web--server nil))
 
 (provide 'agent-shell-dashboard-web)

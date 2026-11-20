@@ -249,9 +249,10 @@ async function prefetchNeighbors() {
   }
 }
 
-async function api(path, body) {
+async function api(path, body, signal) {
   const res = await fetch(path, {
     method: "POST",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
@@ -279,7 +280,7 @@ function rowHtml(row, project) {
       data-buffer="${esc(row.buffer || "")}" data-session="${esc(row.session_id || "")}">
     <div class="l1"><span class="mark">${row.marked ? "*" : " "}</span>
       <span style="color:${row.glyph.color || "inherit"}">${esc(row.glyph.char)}</span>
-      <span class="ago shadow">${esc(row.ago)}</span>
+      <span class="ago shadow">${esc(row.time ? ago(row.time) : row.ago)}</span>
       ${proj}${fork}${esc(row.summary) || '<span class="shadow">—</span>'}</div>
     <div class="l2 shadow">&gt; ${esc(row.preview) || "—"}</div>
   </div>`;
@@ -324,12 +325,27 @@ function renderDashboard() {
     .map((g) => columnHtml(g, showClosed)).join("");
 }
 
-async function loadDashboard(force) {
-  const fresh = await api("/api/sessions", force ? { force: true } : {});
+function ago(time) {
+  const s = Math.max(0, Date.now() / 1000 - time);
+  if (s < 60) return `${Math.floor(s)}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+async function fetchSessions(force) {
+  const fresh = await api("/api/sessions", force ? { force: true } : { etag: data?.etag });
+  if (fresh.unchanged) return false;
   noteVersion(fresh);
   data = fresh;
+  return true;
+}
+
+async function loadDashboard(force) {
+  const changed = await fetchSessions(force);
+  if (!changed) { if (!current) renderDashboard(); return; }
   if (!current) renderDashboard();
-  try { localStorage.setItem("asd-dashboard", JSON.stringify(fresh)); } catch (e) {}
+  try { localStorage.setItem("asd-dashboard", JSON.stringify(data)); } catch (e) {}
 }
 
 function tabLabel(r) {
@@ -358,9 +374,7 @@ function renderTabs() {
 }
 
 async function loadTabs(force) {
-  data = await api("/api/sessions", force ? { force: true } : {});
-  noteVersion(data);
-  renderTabs();
+  if (await fetchSessions(force)) renderTabs();
 }
 
 function findRow(buffer, session) {
@@ -370,7 +384,24 @@ function findRow(buffer, session) {
   return null;
 }
 
-async function loadSession() {
+let watchController = null;
+let lastState = { busy: false, queued: 0 };
+
+async function watchSession() {
+  watchController?.abort();
+  const controller = watchController = new AbortController();
+  const buffer = current?.buffer;
+  while (!controller.signal.aborted && buffer && current?.buffer === buffer) {
+    if (document.hidden || tick === null) { await new Promise((r) => setTimeout(r, 500)); continue; }
+    try { await loadSession(controller.signal); }
+    catch (e) {
+      if (controller.signal.aborted) return;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+async function loadSession(signal) {
   if (!current) return;
   if (!current.buffer) {
     const row = findRow(null, current.session_id);
@@ -390,8 +421,12 @@ async function loadSession() {
   $("stop").style.display = "";
   $("fork").style.display = "";
   const buffer = current.buffer;
-  const s = await api("/api/session", { buffer, tick });
-  if (current?.buffer !== buffer) return;
+  const s = await api("/api/session",
+    signal ? { buffer, tick, wait: true, busy: lastState.busy, queued: lastState.queued } : { buffer, tick },
+    signal);
+  if (current?.buffer !== buffer || s.gone) return;
+  if (!s.unchanged && tick !== null && s.tick < tick) return;
+  lastState = { busy: !!s.busy, queued: s.queued.length };
   $("state").textContent = s.busy ? "working…" : "idle";
   $("state").className = s.busy ? "busy" : "shadow";
   $("queued").textContent = s.queued.length ? `queued: ${s.queued.join(" | ")}` : "";
@@ -757,6 +792,7 @@ function route() {
     const cached = current.buffer && sessionCache.get(current.buffer);
     renderTabs();
     checkUnfork();
+    lastState = { busy: false, queued: 0 };
     if (cached) {
       shown = cached;
       tick = cached.tick;
@@ -768,13 +804,10 @@ function route() {
       withProgress(loadSession()).then(() => setTimeout(prefetchNeighbors, 300)).catch(console.error);
     }
     loadTabs().catch(console.error);
-    let beat = 0;
-    timer = setInterval(() => {
-      if (document.hidden) return;
-      loadSession().catch(console.error);
-      if (++beat % 2 === 0) loadTabs().catch(console.error);
-    }, 1500);
+    watchSession();
+    timer = setInterval(() => { if (!document.hidden) loadTabs().catch(console.error); }, 3000);
   } else {
+    watchController?.abort();
     current = null;
     document.body.classList.remove("in-session");
     $("session").style.display = "none";
