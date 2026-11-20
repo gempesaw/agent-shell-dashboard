@@ -26,6 +26,7 @@
     ("f"   "fork"                agent-shell-dashboard-fork)
     ("F"   "fork, unlinked"      agent-shell-dashboard-fork-detached)
     ("e"   "set summary"         agent-shell-dashboard-set-summary)
+    ("H"   "hand off to another" agent-shell-dashboard-hand-off)
     ("r"   "reload"              agent-shell-dashboard-reload)
     ("k"   "stop (live only)"    agent-shell-dashboard-stop)
     ("K"   "forget permanently"  agent-shell-dashboard-forget)

@@ -35,6 +35,7 @@
     (define-key map (kbd "f")   #'agent-shell-dashboard-fork)
     (define-key map (kbd "F")   #'agent-shell-dashboard-fork-detached)
     (define-key map (kbd "e")   #'agent-shell-dashboard-set-summary)
+    (define-key map (kbd "H")   #'agent-shell-dashboard-hand-off)
     (define-key map (kbd "k")   #'agent-shell-dashboard-stop)
     (define-key map (kbd "K")   #'agent-shell-dashboard-forget)
     ;; `m' marks for the layout.  `mark-as-read' keeps its command but
@@ -741,10 +742,18 @@ get their own column; beyond that, columns start stacking rows."
         (agent-shell--busy-submit :prompt prompt)
       (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t))))
 
-(defun agent-shell-dashboard--unfork-deliver (source target file close &optional unrelated)
+(defun agent-shell-dashboard--unfork-deliver (source target file close &optional unrelated handoff)
   (let ((transcript (agent-shell-dashboard--transcript source)))
     (agent-shell-dashboard--submit
      target
+     (if handoff
+         (concat
+          (format "You are taking over managing %s (session %s), a separate session that keeps running alongside you."
+                  (buffer-name source) (agent-shell-dashboard--session-id source))
+          (format "\n\nIts account of itself is at:\n  %s" file)
+          (when transcript
+            (format "\n\nIts live transcript, to follow what it does from here:\n  %s" transcript))
+          "\n\nRead the account, then tell me in a few lines what state it is in and what you would steer it to do next.")
      (concat
       (if unrelated
           (format "Merging in another session. %s was a separate conversation you have never seen; its work now continues here."
@@ -755,29 +764,29 @@ get their own column; beyond that, columns start stacking rows."
               (if unrelated "that session" "everything since the fork") file)
       (when transcript
         (format "\n\nThe full record of that work, if the account is not enough:\n  %s" transcript))
-      "\n\nRead the account, then tell me in a few lines what changed and what you are carrying forward."))
+      "\n\nRead the account, then tell me in a few lines what changed and what you are carrying forward.")))
     (when close
       (agent-shell-dashboard--hard-kill
        (list :buffer source :session-id (agent-shell-dashboard--session-id source)))
       (when-let* ((dashboard (get-buffer agent-shell-dashboard-buffer-name)))
         (with-current-buffer dashboard
           (agent-shell-dashboard-refresh))))
-    (message "Merged %s into %s" (if close "and closed it" (buffer-name source))
-             (buffer-name target))))
+    (message "%s %s %s %s" (if handoff "Handed" "Merged") (buffer-name source)
+             (if handoff "off to" "into") (buffer-name target))))
 
-(defun agent-shell-dashboard--unfork-wait (source target file close deadline &optional unrelated)
+(defun agent-shell-dashboard--unfork-wait (source target file close deadline &optional unrelated handoff)
   (cond
    ((not (and (buffer-live-p source) (buffer-live-p target)))
     (message "Merge abandoned: a session went away"))
    ((and (file-exists-p file)
          (> (file-attribute-size (file-attributes file)) 0)
          (not (with-current-buffer source (shell-maker-busy))))
-    (agent-shell-dashboard--unfork-deliver source target file close unrelated))
+    (agent-shell-dashboard--unfork-deliver source target file close unrelated handoff))
    ((time-less-p deadline nil)
     (message "Merge gave up waiting for %s" file))
    (t
     (run-at-time 3 nil #'agent-shell-dashboard--unfork-wait
-                 source target file close deadline unrelated))))
+                 source target file close deadline unrelated handoff))))
 
 (defun agent-shell-dashboard-unfork (&optional keep)
   (interactive "P")
@@ -788,7 +797,7 @@ get their own column; beyond that, columns start stacking rows."
          (target (agent-shell-dashboard--pick-unfork-target relatives)))
     (agent-shell-dashboard--unfork-into source target (not keep))))
 
-(defun agent-shell-dashboard--unfork-into (source target close)
+(defun agent-shell-dashboard--unfork-into (source target close &optional handoff)
   (let* ((unrelated (not (memq target (agent-shell-dashboard--fork-relatives source))))
          (file (agent-shell-dashboard--unfork-file source))
          (since (and (not unrelated)
@@ -799,28 +808,35 @@ get their own column; beyond that, columns start stacking rows."
     (agent-shell-dashboard--submit
      source
      (concat
-      (if unrelated
-          (concat
-           (format "We are merging this session into %s, which knows nothing about it. "
-                   (buffer-name target))
-           (format "Write to %s an account of this session: what it set out to do" file))
+      (cond
+       (handoff
+        (concat
+         (format "%s is taking over managing this session, which keeps running; it knows nothing about this session yet. "
+                 (buffer-name target))
+         (format "Write to %s an account of this session: what it set out to do, where it stands now, what it is waiting on" file)))
+       (unrelated
+        (concat
+         (format "We are merging this session into %s, which knows nothing about it. "
+                 (buffer-name target))
+         (format "Write to %s an account of this session: what it set out to do" file)))
+       (t
         (concat
          (format "We are folding this session back into %s, which shares everything that happened before this session was forked off. "
                  (buffer-name target))
          (format "Write to %s an account of only what happened after the fork" file)
-         (if since (format ", starting from my message that began %S" since) "")))
+         (if since (format ", starting from my message that began %S" since) ""))))
       ". Cover what was decided, what changed (files, commits, branches, PRs), what was learned, and what is still open."
-      (unless unrelated
+      (unless (or unrelated handoff)
         " Do not restate anything from before the fork; the other session already has it.")
       " Plain markdown, as short as it can be while still letting the other session pick up this work. Reply only with \"written\" when the file is saved."))
     (agent-shell-dashboard--unfork-wait
      source target file close
      (time-add nil agent-shell-dashboard-unfork-timeout)
-     unrelated)
+     unrelated handoff)
     (message "Asked %s to write itself up; will hand it to %s when done"
              (buffer-name source) (buffer-name target))))
 
-(defun agent-shell-dashboard--pick-merge-target (source)
+(defun agent-shell-dashboard--pick-merge-target (source &optional prompt)
   (let* ((relatives (agent-shell-dashboard--fork-relatives source))
          (others (--remove (or (eq it source) (memq it relatives))
                            (agent-shell-dashboard--all-buffers)))
@@ -841,7 +857,7 @@ get their own column; beyond that, columns start stacking rows."
                     (complete-with-action action (mapcar #'car choices) string pred)))))
     (unless choices
       (user-error "No other live session to merge into"))
-    (cdr (assoc (completing-read (format "Merge %s into: " (buffer-name source))
+    (cdr (assoc (completing-read (format (or prompt "Merge %s into: ") (buffer-name source))
                                  table nil t nil nil (and relatives (caar choices)))
                 choices))))
 
@@ -851,6 +867,18 @@ get their own column; beyond that, columns start stacking rows."
                     (user-error "Not in an agent-shell session"))))
     (agent-shell-dashboard--unfork-into
      source (agent-shell-dashboard--pick-merge-target source) (not keep))))
+
+(defun agent-shell-dashboard-hand-off ()
+  "Hand this session to another one to manage, leaving it running.
+The session writes an account of itself, which the other session is
+then given along with this session's live transcript."
+  (interactive)
+  (let ((source (or (agent-shell-dashboard--unfork-source)
+                    (user-error "Not in an agent-shell session"))))
+    (agent-shell-dashboard--unfork-into
+     source
+     (agent-shell-dashboard--pick-merge-target source "Hand %s off to: ")
+     nil t)))
 
 (defun agent-shell-dashboard ()
   "Open the agent-shell dashboard, taking over the current frame.
