@@ -134,6 +134,10 @@ Emacs on machines that do not have it installed."
                   :null)
           :cwd (or (plist-get row :cwd) :null)
           :marked (if (agent-shell-dashboard-row-marked-p row) t :false)
+          :mode (or (and live
+                         (with-current-buffer buffer
+                           (agent-shell--current-mode-id (agent-shell--state))))
+                    :null)
           :recency (symbol-name (or (and live (agent-shell-dashboard--row-recency row)) 'none)))))
 
 (defun agent-shell-dashboard-web--live-ids ()
@@ -318,10 +322,50 @@ Nil leaves code blocks without a run button.")
                    (point-min))))
     (car (split-string (buffer-substring-no-properties start body-start)))))
 
+(defun agent-shell-dashboard-web--button-action (pos)
+  (when (get-text-property pos 'button)
+    (let ((map (get-text-property pos 'keymap)))
+      (and (keymapp map)
+           (let ((action (lookup-key map (kbd "RET"))))
+             (and (commandp action) action))))))
+
+(defun agent-shell-dashboard-web--press (buffer pos text)
+  (with-current-buffer buffer
+    (let ((action (and (integerp pos)
+                       (<= (point-min) pos) (< pos (point-max))
+                       (equal (buffer-substring-no-properties
+                               pos (min (point-max) (+ pos (length text))))
+                              text)
+                       (agent-shell-dashboard-web--button-action pos))))
+      (unless action
+        (signal 'user-error (list "That button is gone; the session has moved on")))
+      (save-window-excursion
+        (save-excursion
+          (goto-char pos)
+          (call-interactively action)))
+      '(:ok t))))
+
+(defun agent-shell-dashboard-web--modes (buffer)
+  (with-current-buffer buffer
+    (list :current (or (agent-shell--current-mode-id (agent-shell--state)) :null)
+          :modes (vconcat
+                  (mapcar (lambda (mode)
+                            (list :id (map-elt mode :id) :name (map-elt mode :name)))
+                          (agent-shell--get-available-modes (agent-shell--state)))))))
+
+(defun agent-shell-dashboard-web--set-mode (buffer mode)
+  (with-current-buffer buffer
+    (unless (seq-find (lambda (m) (equal (map-elt m :id) mode))
+                      (agent-shell--get-available-modes (agent-shell--state)))
+      (signal 'user-error (list (format "Unknown mode %s" mode))))
+    (agent-shell--config-option-set-mode-id :mode-id mode)
+    '(:ok t)))
+
 (defun agent-shell-dashboard-web--runs (start end &optional reveal)
   "Runs between START and END, as (RUNS STYLES SECTIONS).
-Each run is [TEXT STYLE HIDDEN SECTION ROLE URL], SECTION an index into
-SECTIONS or -1 and URL the link target, if any.  Unless REVEAL, invisible text is left out: it is most
+Each run is [TEXT STYLE HIDDEN SECTION ROLE URL SNIPPET BUTTON], SECTION
+an index into SECTIONS or -1, URL the link target, if any, and BUTTON
+the buffer position to press for a clickable button, or -1.  Unless REVEAL, invisible text is left out: it is most
 of a session buffer, and copying it on every update costs a garbage
 collection.  A collapsed section's body becomes one empty marker run, so
 the page knows it exists and can fetch it when opened."
@@ -389,7 +433,10 @@ the page knows it exists and can fetch it when opened."
                           (let ((url (or (get-text-property pos 'agent-shell-markdown-url)
                                          (get-text-property pos 'browse-url-data))))
                             (if (and (not hidden) (stringp url)) url ""))
-                          snippet)
+                          snippet
+                          (if (and (not hidden) (agent-shell-dashboard-web--button-action pos))
+                              pos
+                            -1))
                   runs))))
         (setq pos next)))
     (list (vconcat (nreverse runs)) (vconcat styles) (vconcat (nreverse sections)))))
@@ -654,6 +701,18 @@ projectile's list — so the page cannot start an agent anywhere else."
            (agent-shell-dashboard-web--session-buffer (plist-get args :target))
            t)
           '(:ok t))
+         ("/api/press"
+          (agent-shell-dashboard-web--press
+           (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
+           (plist-get args :pos)
+           (or (plist-get args :text) "")))
+         ("/api/modes"
+          (agent-shell-dashboard-web--modes
+           (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))))
+         ("/api/set-mode"
+          (agent-shell-dashboard-web--set-mode
+           (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))
+           (plist-get args :mode)))
          ("/api/section"
           (agent-shell-dashboard-web--section
            (agent-shell-dashboard-web--session-buffer (plist-get args :buffer))

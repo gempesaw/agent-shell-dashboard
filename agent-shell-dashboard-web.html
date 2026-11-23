@@ -46,6 +46,16 @@
   #last-prompt { padding: 6px 14px; border-bottom: 1px solid rgba(255,255,255,.12);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #last-prompt:empty { display: none; }
+  .btn { cursor: pointer; border: 1px solid currentColor; border-radius: 3px; }
+  .btn:active { opacity: .6; }
+  #mode-warn { color: #ffb86c; font-weight: bold; white-space: nowrap; }
+  #menu { display: none; position: absolute; right: 14px; bottom: 100%; z-index: 5;
+    width: min(320px, calc(100% - 28px)); background: var(--bg);
+    border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
+  #menu div { padding: 8px; border-radius: 4px; cursor: pointer; }
+  #menu div:hover { background: rgba(255,255,255,.12); }
+  #menu .head { cursor: default; padding-top: 12px; }
+  #menu .head:hover { background: none; }
   #unfork-menu { display: none; position: absolute; right: 14px; bottom: 100%; z-index: 5;
     max-height: 60vh; overflow: auto; width: min(520px, calc(100% - 28px)); background: var(--bg);
     border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 6px; }
@@ -161,10 +171,16 @@
     <button onclick="go('')">←<span class="wide"> back</span></button>
     <span class="title" id="session-name"></span>
     <span id="state" class="shadow"></span>
+    <span id="mode-warn"></span>
     <button class="refresh" onclick="refresh()" title="refresh">↻</button>
-    <button id="fork" onclick="fork()">fork</button>
-    <button id="unfork" onclick="toggleUnforkMenu()" style="display:none">unfork</button>
     <button id="stop" onclick="interrupt()">cancel</button>
+    <button id="menu-btn" onclick="toggleMenu()" title="menu">☰</button>
+    <div id="menu">
+      <div id="fork" onclick="closeMenu(); fork()">fork</div>
+      <div id="unfork" onclick="closeMenu(); toggleUnforkMenu()" style="display:none">unfork…</div>
+      <div class="head shadow">permissions</div>
+      <div id="mode-list"></div>
+    </div>
     <div id="unfork-menu">
       <div class="shadow" style="cursor:default">fold into (this fork is then deleted):</div>
       <div id="unfork-list"></div>
@@ -357,6 +373,7 @@ let tabOrder = [];
 
 function renderTabs() {
   if (!data || !current) return;
+  showMode();
   const rows = data.groups.flatMap((g) => g.rows).filter((r) => r.live &&
     (r.marked || r.recency === "recent" || r.status === "working" || r.buffer === current.buffer));
   const byBuffer = new Map(rows.map((r) => [r.buffer, r]));
@@ -472,10 +489,52 @@ function linkify(text, url) {
   return out + esc(text.slice(last));
 }
 
+function btnAttrs(pos, text) {
+  return ` class="btn" data-p="${pos}" data-t="${esc(text)}"`;
+}
+
+async function press(pos, text) {
+  try {
+    await withProgress(api("/api/press", { buffer: current.buffer, pos, text }));
+  } catch (e) { alert(e.message); }
+  loadSession().catch(console.error);
+}
+
+function closeMenu() { $("menu").style.display = "none"; }
+
+async function toggleMenu() {
+  const menu = $("menu");
+  if (menu.style.display === "block") return closeMenu();
+  $("unfork-menu").style.display = "none";
+  menu.style.display = "block";
+  $("mode-list").innerHTML = '<span class="shadow">…</span>';
+  try {
+    const r = await api("/api/modes", { buffer: current.buffer });
+    $("mode-list").innerHTML = r.modes.map((m) =>
+      `<div data-mode="${esc(m.id)}">${m.id === r.current ? "● " : "○ "}${esc(m.name)}</div>`).join("");
+  } catch (e) { $("mode-list").innerHTML = `<span class="shadow">${esc(e.message)}</span>`; }
+}
+
+async function setMode(mode) {
+  closeMenu();
+  try {
+    await withProgress(api("/api/set-mode", { buffer: current.buffer, mode }));
+    const row = findRow(current.buffer);
+    if (row) row.mode = mode;
+    showMode();
+    setTimeout(() => loadTabs(true).then(showMode).catch(console.error), 1500);
+  } catch (e) { alert("Could not change mode: " + e.message); }
+}
+
+function showMode() {
+  const mode = current?.buffer && findRow(current.buffer)?.mode;
+  $("mode-warn").textContent = mode && mode !== "bypassPermissions" ? "⚠ " + mode : "";
+}
+
 function runsHtml(runs, styles) {
   const css = styleCss(styles);
-  return runs.map(([text, style, , , , url]) =>
-    `<span${css[style] ? ` style="${css[style]}"` : ""}>${linkify(text, url)}</span>`).join("");
+  return runs.map(([text, style, , , , url, , pos]) =>
+    `<span${css[style] ? ` style="${css[style]}"` : ""}${pos >= 0 ? btnAttrs(pos, text) : ""}>${linkify(text, url)}</span>`).join("");
 }
 
 async function loadBody(sec) {
@@ -501,7 +560,7 @@ function paint() {
   const open = (sec) => toggled.has(sec) ? toggled.get(sec) : !collapsedInEmacs.get(sec);
 
   $("text").innerHTML = (shown.truncated ? '<span class="shadow">… (earlier output trimmed)\n\n</span>' : "") +
-    shown.runs.map(([text, style, hidden, i, role, url, snip]) => {
+    shown.runs.map(([text, style, hidden, i, role, url, snip, pos]) => {
       const sec = name(i);
       if (sec && collapsedInEmacs.has(sec)) {
         if (role === "b") {
@@ -522,6 +581,7 @@ function paint() {
         button = `<button class="snip-run" data-snip="${snip}">▶ run</button>\n`;
       }
       const attrs = (hidden ? ' class="inv"' : "") + (css[style] ? ` style="${css[style]}"` : "") +
+        (!hidden && pos >= 0 ? btnAttrs(pos, text) : "") +
         (sec && (role === "i" || role === "l") ? ` data-s="${esc(sec)}" data-r="${role}"` : "") +
         (sec && role === "b" ? ` data-b="${esc(sec)}"` : "");
       return button + `<span${attrs}>${linkify(text, url)}</span>`;
@@ -529,6 +589,8 @@ function paint() {
 }
 
 $("text").addEventListener("click", (e) => {
+  const btn = e.target.closest(".btn");
+  if (btn) { press(Number(btn.dataset.p), btn.dataset.t); return; }
   const run = e.target.closest(".snip-run");
   if (run) { openSnippet(Number(run.dataset.snip)); return; }
   if (e.target.closest("a")) return;
@@ -822,6 +884,9 @@ document.addEventListener("click", (e) => {
   const into = e.target.closest("[data-unfork]");
   if (into) return unfork(into.dataset.unfork);
   if (!e.target.closest("#unfork-menu, #unfork")) $("unfork-menu").style.display = "none";
+  if (!e.target.closest("#menu, #menu-btn")) closeMenu();
+  const mode = e.target.closest("[data-mode]");
+  if (mode) return setMode(mode.dataset.mode);
   const fresh = e.target.closest("[data-new]");
   if (fresh) return newSession(fresh.dataset.new);
   if (!e.target.closest("#new-menu, [onclick^='toggleNewMenu']")) $("new-menu").style.display = "none";
@@ -922,7 +987,7 @@ $("search").addEventListener("input", renderDashboard);
 $("new-filter").addEventListener("input", renderNewList);
 $("new-filter").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { const first = $("new-list").querySelector("[data-new]"); if (first) newSession(first.dataset.new); }
-  if (e.key === "Escape") { $("new-menu").style.display = "none"; $("unfork-menu").style.display = "none"; }
+  if (e.key === "Escape") { $("new-menu").style.display = "none"; $("unfork-menu").style.display = "none"; closeMenu(); }
 });
 $("show-closed").checked = localStorage.getItem("asd-closed") !== "0";
 $("show-closed").addEventListener("change", (e) => {
