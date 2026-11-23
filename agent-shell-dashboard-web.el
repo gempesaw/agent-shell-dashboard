@@ -816,5 +816,8 @@ projectile's list — so the page cannot start an agent anywhere else."
   (setq agent-shell-dashboard-web--waiters nil)
   (setq agent-shell-dashboard-web--server nil))
 
+(clrhash agent-shell-dashboard-web--transcripts)
+(setq agent-shell-dashboard-web--snapshot nil)
+
 (provide 'agent-shell-dashboard-web)
 ;;; agent-shell-dashboard-web.el ends here
