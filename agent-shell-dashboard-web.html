@@ -421,6 +421,12 @@ async function watchSession() {
 async function loadSession(signal) {
   if (!current) return;
   if (!current.buffer) {
+    if (resolving) {
+      $("closed").style.display = "none";
+      $("compose").style.display = "none";
+      $("state").textContent = "…";
+      return;
+    }
     const row = findRow(null, current.session_id);
     $("session-name").textContent = current.session_id;
     $("summary").textContent = row?.summary || "";
@@ -837,11 +843,32 @@ async function resume() {
 
 function go(path) { location.hash = path ? "#/" + path : ""; }
 
+let resolving = false;
+
+function liveBufferFor(sessionId) {
+  const row = findRow(null, sessionId);
+  return row?.live && row.buffer ? row.buffer : null;
+}
+
 function route() {
   clearInterval(timer);
   const m = location.hash.match(/^#\/(s|c)\/(.+)$/);
   if (m) {
     current = m[1] === "s" ? { buffer: decodeURIComponent(m[2]) } : { session_id: decodeURIComponent(m[2]) };
+    if (!current.buffer) {
+      const live = liveBufferFor(current.session_id);
+      if (live) {
+        history.replaceState(null, "", "#/s/" + encodeURIComponent(live));
+        current = { buffer: live };
+      } else if (!resolving) {
+        resolving = true;
+        fetchSessions(false).catch(console.error).finally(() => {
+          resolving = false;
+          if (current?.session_id && liveBufferFor(current.session_id)) route();
+          else loadSession().catch(console.error);
+        });
+      }
+    }
     tick = null;
     shown = null;
     toggled = new Map();
